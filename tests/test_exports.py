@@ -23,8 +23,9 @@ def test_pdf_is_valid_and_labels_sample_data(results):
 
 def test_excel_sheets_contents_filters_and_links(results):
     wb = openpyxl.load_workbook(io.BytesIO(build_workbook(results)))
-    assert wb.sheetnames == ["Channel Overview", "Video Performance", "Title Analysis", "Title Patterns", "Topic Analysis",
-                             "Competitors", "Content Gaps", "Content Calendar", "Sources and Notes"]
+    assert wb.sheetnames == ["Channel Overview", "Growth Roadmap", "Roadmap Actions", "Daily Plan", "Video Performance", "Title Analysis",
+                             "Title Patterns", "Topic Analysis", "Competitors", "Auto Competitors", "Content Gaps", "Content Calendar",
+                             "Sources and Notes"]
     vp = wb["Video Performance"]
     headers = [c.value for c in vp[1]]
     assert vp.max_row == len(results["videos"]) + 1 and vp.auto_filter.ref and vp.freeze_panes == "A2"
@@ -88,12 +89,13 @@ def test_source_tree_contains_no_hardcoded_keys():
     for path in list(root.rglob("*.py")) + list(root.rglob("*.toml*")) + [root / "README.md"]:
         if not path.exists():
             continue
-        if "tests" in path.parts:
+        if "tests" in path.parts or path.name == "secrets.toml":
             continue
         text = path.read_text(encoding="utf-8")
         assert not re.search(r"AIza[0-9A-Za-z_\-]{35}", text), path
         assert not re.search(r"sk-[A-Za-z0-9_\-]{20,}", text), path
-    assert ".env" in (root / ".gitignore").read_text() and "secrets.toml" in (root / ".gitignore").read_text()
+    ignore = (root / ".gitignore").read_text()
+    assert ".env" in ignore and ".streamlit/secrets.toml" in ignore  # local key file must never be committed
 
 
 def test_redact_secrets():
@@ -155,9 +157,8 @@ def _run_app():
     return at
 
 
-def _analyse(at, channel, competitors=""):
+def _analyse(at, channel):
     [t for t in at.sidebar.text_input if "Your channel" in t.label][0].set_value(channel)
-    at.sidebar.text_area[0].set_value(competitors)
     at.sidebar.button[0].click()
     return at.run()
 
@@ -167,19 +168,27 @@ def test_app_renders_empty_state_without_errors():
     assert not at.exception and "results" not in at.session_state
 
 
-def test_app_invalid_input_and_missing_key_show_friendly_errors(monkeypatch):
-    monkeypatch.delenv("YOUTUBE_API_KEY", raising=False)
+def test_app_has_no_key_or_competitor_inputs_and_no_search():
     at = _run_app()
-    at = _analyse(at, "https://youtu.be/notachannel")
+    labels = [w.label for w in list(at.sidebar.text_input) + list(at.sidebar.text_area)]
+    assert labels == ["Your channel"]  # no API-key prompts, no competitor box
+    assert not at.exception
+
+
+def test_app_invalid_input_shows_friendly_error():
+    at = _analyse(_run_app(), "https://youtu.be/notachannel")
     assert not at.exception and any("Input problem" in e.value for e in at.error)
-    # un-tick sample mode with no key -> clear message
-    [c for c in at.sidebar.checkbox if "SAMPLE" in c.label][0].uncheck()
-    at = _analyse(at, "@somechannel")
-    assert not at.exception and any("API key" in e.value for e in at.error)
+
+
+def test_app_tabs_include_roadmap_and_no_search():
+    at = _analyse(_run_app(), "@sample_own")
+    names = [t.label for t in at.tabs]
+    assert any("Growth Roadmap" in n for n in names) and "Search" not in names and not at.exception
+    assert len(at.session_state["results"]["competitors"]) == 11  # you + 10 auto-discovered
 
 
 def test_app_downloads_survive_reruns_and_new_search_replaces_results():
-    at = _analyse(_run_app(), "@sample_own", "@rival_a")
+    at = _analyse(_run_app(), "@sample_own")
     assert not at.exception and at.session_state["results"]["channel"]["title"].endswith("Sample_Own")
     [b for b in at.button if b.label == "Build / refresh export files"][0].click()
     at.run()
@@ -191,11 +200,11 @@ def test_app_downloads_survive_reruns_and_new_search_replaces_results():
     at = _analyse(at, "@another_sample")
     assert at.session_state["results"]["channel"]["title"] != first_title
     assert "exports" not in at.session_state or not at.session_state["exports"]  # old exports discarded
-    assert at.session_state["results"]["competitors"].empty  # competitors from the previous run are gone
+    assert at.session_state["results"]["meta"]["channel_input"] == "@another_sample"  # nothing carried over from the previous run
 
 
 def test_app_calendar_marks_exports_stale():
-    at = _analyse(_run_app(), "@sample_own", "@rival_a")
+    at = _analyse(_run_app(), "@sample_own")
     [b for b in at.button if b.label == "Build / refresh export files"][0].click()
     at.run()
     [b for b in at.button if b.label == "Generate content calendar"][0].click()

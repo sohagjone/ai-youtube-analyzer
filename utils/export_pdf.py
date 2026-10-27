@@ -14,7 +14,7 @@ from reportlab.platypus import Image, PageBreak, Paragraph, SimpleDocTemplate, S
 from utils.charts import build_charts
 from utils.data_processing import build_export_tables, format_number, prepare_df_for_export
 
-RED = colors.HexColor("#d62828")
+RED = colors.HexColor("#6C5CE7")
 MAX_ROWS = 25
 MAX_CHARS = 140
 
@@ -71,7 +71,7 @@ def build_pdf(results: dict) -> bytes:
         story.append(Paragraph("<b>SAMPLE DATA: every figure in this report is illustrative and not real YouTube data.</b>", body))
     story.append(Spacer(1, 6))
 
-    def section(title: str, key: str | None, chart: str | None = None, cols: list[str] | None = None, note: str | None = None):
+    def section(title: str, key: str | None, chart: str | None = None, cols: list[str] | None = None, note: str | None = None, max_rows: int = MAX_ROWS):
         story.append(Paragraph(title, h2))
         if note:
             story.append(Paragraph(escape(note), body))
@@ -79,12 +79,20 @@ def build_pdf(results: dict) -> bytes:
             story.append(Image(io.BytesIO(charts[chart]), width=width, height=width * 0.43))
         if key and key in tables and len(tables[key]):
             story.append(Spacer(1, 4))
-            story.append(_table(tables[key], styles, width, cols))
+            story.append(_table(tables[key], styles, width, cols, max_rows))
         elif not chart:
             story.append(Paragraph("No data available for this section.", body))
         story.append(Spacer(1, 8))
 
+    rm = results.get("roadmap") or {}
+    rm_note = ("Targets are planning goals derived from peer benchmarks, not predictions. "
+               + (f"Channel health score: {rm['health_score']}/100 (100 = at or above peer median on every KPI). " if rm.get("health_score") is not None else "")
+               + f"Benchmark source: {rm.get('benchmark_source', 'n/a')}.") if rm.get("available") else None
     section("1. Channel overview", "Channel Overview", note="Lifetime figures describe the whole channel; sample figures describe only the selected videos/date range.")
+    section("Growth roadmap", "Growth Roadmap", "Roadmap",
+            cols=["Metric", "You", "Benchmark", "Status", "Day 30 target", "Day 60 target", "Day 90 target"], note=rm_note)
+    section("Priority actions", "Roadmap Actions", cols=["Priority Rank", "Kpi", "Action", "How"], max_rows=10)
+    section("30-day action plan", "Daily Plan", cols=["Day", "Date", "Focus", "Task", "Deliverable"], max_rows=30)
     section("2. Video performance", "Video Performance", "Views timeline",
             cols=["Title", "Published (UTC)", "Views (public)", "Views per day", "Relative to median", "Format", "Performance flag"],
             note="Public view counts only. Older videos have had longer to accumulate views; low views are not automatically a failure.")
@@ -92,8 +100,9 @@ def build_pdf(results: dict) -> bytes:
             note="Patterns are observational and not proof that a style causes better results. Thumbnail click-through rate is not available from public data.")
     section("4. Topic breakdown", "Topic Analysis", "Topics", cols=["Topic", "Videos", "Share", "Median Views", "Median Relative", "Observation"],
             note=f"Topic method: {meta.get('topic_method', '')}. Based on metadata (titles, tags, descriptions), not full video content.")
-    section("5. Competitor comparison", "Competitors", "Competitors",
-            cols=["Role", "Channel", "Subscribers", "Median Views", "Uploads Per 30 Days", "Short Form Share", "Main Topics"])
+    section("5. Competitor comparison (auto-discovered)", "Competitors", "Competitors",
+            cols=["Role", "Channel", "Subscribers", "Median Views", "Uploads Per 30 Days", "Short Form Share", "Main Topics"], max_rows=15,
+            note="Competitors were found automatically from channels publishing recent videos on your topics; this is a heuristic, not a ranking of true rivals.")
     if results.get("competitor_differences"):
         for line in results["competitor_differences"]:
             story.append(Paragraph("&bull; " + escape(line), body))

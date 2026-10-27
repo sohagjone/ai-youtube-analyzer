@@ -232,6 +232,18 @@ def build_export_tables(results: dict) -> dict[str, pd.DataFrame]:
         t["Content Gaps"] = results["gaps"].rename(columns=lambda c: c.replace("_", " ").title())
     if len(results.get("calendar", [])):
         t["Content Calendar"] = results["calendar"].rename(columns=lambda c: c.replace("_", " ").title())
+    rm = results.get("roadmap") or {}
+    if rm.get("available"):
+        k = rm["kpis"][["metric", "you", "benchmark", "benchmark_source", "attainment", "status", "target_30", "target_60", "target_90"]].copy()
+        for c in ("you", "benchmark", "attainment", "target_30", "target_60", "target_90"):
+            k[c] = k[c].astype(float).round(4)
+        t["Growth Roadmap"] = k.rename(columns={"metric": "Metric", "you": "You", "benchmark": "Benchmark", "benchmark_source": "Benchmark source",
+                                                "attainment": "Attainment vs benchmark", "status": "Status", "target_30": "Day 30 target",
+                                                "target_60": "Day 60 target", "target_90": "Day 90 target"})
+        t["Roadmap Actions"] = rm["actions"].rename(columns=lambda c: c.replace("_", " ").title())
+        t["Daily Plan"] = rm["daily_plan"].rename(columns=lambda c: c.replace("_", " ").title())
+    if len(results.get("discovered_competitors", [])):
+        t["Auto Competitors"] = results["discovered_competitors"].drop(columns=["channel_id"], errors="ignore").rename(columns=lambda c: c.replace("_", " ").title())
     meta = results.get("meta", {})
     rows = [{"Type": "Analysis", "Item": "Analysis date (UTC)", "Detail": meta.get("analysis_date")},
             {"Type": "Analysis", "Item": "Data mode", "Detail": meta.get("mode")},

@@ -268,19 +268,39 @@ class YouTubeClient:
             notes.append(f"Only {len(videos)} public video(s) available for the selected sample/date range (requested {sample_size}).")
         return {"channel": channel, "videos": videos, "notes": notes}
 
-    # ------------------------------------------------------------------ search
-    def search_videos(self, query: str, max_results: int = 25, order: str = "relevance",
-                      published_after: datetime | None = None) -> list[dict]:
-        """keyword search (100 quota units per call). Results are not a complete or demand-ranked list."""
-        if not query or not query.strip():
-            raise YouTubeAPIError("Enter a search keyword.")
-        params: dict[str, Any] = {"part": "snippet", "type": "video", "q": query.strip(),
-                                  "maxResults": max(1, min(int(max_results), 50)), "order": order}
-        if published_after:
-            params["publishedAfter"] = published_after.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        data = self._get("search", params)
-        ids = [(i.get("id") or {}).get("videoId") for i in data.get("items", [])]
-        return self.get_videos([i for i in ids if i])
+    # ------------------------------------------------------------------ competitor discovery
+    def find_channel_candidates(self, queries: list[str], max_per_query: int = 50,
+                                published_after: datetime | None = None) -> list[dict]:
+        """Channels that publish recent videos matching the queries (100 quota units per query).
+        Returns [{channel_id, title, hits}] sorted by how many query results each channel appeared in."""
+        found: dict[str, dict] = {}
+        for q in queries:
+            if not q or not q.strip():
+                continue
+            params: dict[str, Any] = {"part": "snippet", "type": "video", "q": q.strip(),
+                                      "maxResults": max(1, min(int(max_per_query), 50)), "order": "relevance"}
+            if published_after:
+                params["publishedAfter"] = published_after.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            data = self._get("search", params)
+            seen: set[str] = set()
+            for item in data.get("items", []):
+                sn = item.get("snippet") or {}
+                cid = sn.get("channelId")
+                if not cid or cid in seen:
+                    continue
+                seen.add(cid)
+                entry = found.setdefault(cid, {"channel_id": cid, "title": sn.get("channelTitle", ""), "hits": 0})
+                entry["hits"] += 1
+        return sorted(found.values(), key=lambda e: -e["hits"])
+
+    def get_channels_by_ids(self, channel_ids: list[str]) -> list[dict]:
+        """Batch channel lookup (1 quota unit per 50 channels)."""
+        out: list[dict] = []
+        for i in range(0, len(channel_ids), 50):
+            batch = channel_ids[i:i + 50]
+            data = self._get("channels", {"part": "snippet,statistics,contentDetails", "id": ",".join(batch), "maxResults": 50})
+            out.extend(self._normalise_channel(it) for it in data.get("items", []))
+        return out
 
 
 def _parse_dt(value: str | None) -> datetime | None:

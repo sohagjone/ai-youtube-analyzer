@@ -1,0 +1,31 @@
+﻿day,date,phase,focus,task,kpi,est_minutes,deliverable,done
+1,2026-10-27,Foundation (days 1-7),Baseline,"Record today's baseline: subscribers, median views, views/day, uploads in the last 30 days (see KPI table)",All KPIs,30,Baseline sheet,False
+2,2026-10-28,Foundation (days 1-7),Audit,"Review your top videos (Pour over gear guide; My espresso routine; Espresso vs the alternatives: honest test) and list what they share: topic, hook, format, title structure",Breakout rate,60,Pattern list,False
+3,2026-10-29,Foundation (days 1-7),Plan,Pick 3 topic pillars from your strongest topics and the top Content Gap ideas; fix your publishing days,Upload steadiness,45,Topic pillars + schedule,False
+4,2026-10-30,Foundation (days 1-7),Quick win,Rewrite titles/descriptions for older below-typical videos (e.g. Coffee grinder explained simply; 5 tips for better home roasting); keep the video's real subject,Views per day,45,Updated titles,False
+5,2026-10-31,Foundation (days 1-7),Research,Collect 3 angles from top competitor/peer videos on your next topic (note what they miss),Views per day,45,Angle notes,False
+6,2026-11-01,Foundation (days 1-7),Script,Write the script outline and 3 alternative opening hooks,Breakout rate,60,Script + 3 hooks,False
+7,2026-11-02,Foundation (days 1-7),Weekly checkpoint,Compare with targets: about 1 upload(s) should be live by now (day-30 goal 3.1 per 30 days); note views/day of the last 7 days and adjust next week's topics,All KPIs,30,Checkpoint notes,False
+8,2026-11-03,Build (days 8-21),Publish,"Publish video #1: ""Brew Explained: What to Know Before You Start"" (Long-form (>3 min)). Pre-publish check: subject clear in the first words of the title, no overpromising, one clear question or CTA",Uploads per 30 days,60,Published video,False
+9,2026-11-04,Build (days 8-21),Packaging,"Write 5 title options (clear subject first, no overpromising) and sketch the thumbnail","Views per 1,000 subscribers",40,Title shortlist + thumbnail sketch,False
+10,2026-11-05,Build (days 8-21),Engage,Reply to recent comments and pin a question on your latest video,Engagement rate,30,Pinned comment + replies,False
+11,2026-11-06,Build (days 8-21),Repurpose,Cut a Short or clip from your best recent long video,Uploads per 30 days,60,One Short/clip,False
+12,2026-11-07,Build (days 8-21),Produce,Film or record the next video (batch if possible),Uploads per 30 days,120,Raw footage,False
+13,2026-11-08,Build (days 8-21),Research,Collect 3 angles from top competitor/peer videos on your next topic (note what they miss),Views per day,45,Angle notes,False
+14,2026-11-09,Build (days 8-21),Weekly checkpoint,Compare with targets: about 1 upload(s) should be live by now (day-30 goal 3.1 per 30 days); note views/day of the last 7 days and adjust next week's topics,All KPIs,30,Checkpoint notes,False
+15,2026-11-10,Build (days 8-21),Script,Write the script outline and 3 alternative opening hooks,Breakout rate,60,Script + 3 hooks,False
+16,2026-11-11,Build (days 8-21),Publish,"Publish video #2: ""Ratios Mistakes: What to Know Before You Start"" (Long-form (>3 min)). Pre-publish check: subject clear in the first words of the title, no overpromising, one clear question or CTA",Uploads per 30 days,60,Published video,False
+17,2026-11-12,Build (days 8-21),Packaging,"Write 5 title options (clear subject first, no overpromising) and sketch the thumbnail","Views per 1,000 subscribers",40,Title shortlist + thumbnail sketch,False
+18,2026-11-13,Build (days 8-21),Engage,Reply to recent comments and pin a question on your latest video,Engagement rate,30,Pinned comment + replies,False
+19,2026-11-14,Build (days 8-21),Repurpose,Cut a Short or clip from your best recent long video,Uploads per 30 days,60,One Short/clip,False
+20,2026-11-15,Build (days 8-21),Produce,Film or record the next video (batch if possible),Uploads per 30 days,120,Raw footage,False
+21,2026-11-16,Build (days 8-21),Weekly checkpoint,Compare with targets: about 2 upload(s) should be live by now (day-30 goal 3.1 per 30 days); note views/day of the last 7 days and adjust next week's topics,All KPIs,30,Checkpoint notes,False
+22,2026-11-17,Optimise (days 22-30),Research,Collect 3 angles from top competitor/peer videos on your next topic (note what they miss),Views per day,45,Angle notes,False
+23,2026-11-18,Optimise (days 22-30),Publish,"Publish video #3: ""Steaming Gear: What to Know Before You Start"" (Long-form (>3 min)). Pre-publish check: subject clear in the first words of the title, no overpromising, one clear question or CTA",Uploads per 30 days,60,Published video,False
+24,2026-11-19,Optimise (days 22-30),Script,Write the script outline and 3 alternative opening hooks,Breakout rate,60,Script + 3 hooks,False
+25,2026-11-20,Optimise (days 22-30),Packaging,"Write 5 title options (clear subject first, no overpromising) and sketch the thumbnail","Views per 1,000 subscribers",40,Title shortlist + thumbnail sketch,False
+26,2026-11-21,Optimise (days 22-30),Engage,Reply to recent comments and pin a question on your latest video,Engagement rate,30,Pinned comment + replies,False
+27,2026-11-22,Optimise (days 22-30),Repurpose,Cut a Short or clip from your best recent long video,Uploads per 30 days,60,One Short/clip,False
+28,2026-11-23,Optimise (days 22-30),Weekly checkpoint,Compare with targets: about 3 upload(s) should be live by now (day-30 goal 3.1 per 30 days); note views/day of the last 7 days and adjust next week's topics,All KPIs,30,Checkpoint notes,False
+29,2026-11-24,Optimise (days 22-30),Produce,Film or record the next video (batch if possible),Uploads per 30 days,120,Raw footage,False
+30,2026-11-25,Optimise (days 22-30),Research,Collect 3 angles from top competitor/peer videos on your next topic (note what they miss),Views per day,45,Angle notes,False

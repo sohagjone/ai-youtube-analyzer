@@ -10,7 +10,7 @@ from docx.shared import Inches, Pt
 from utils.charts import build_charts
 from utils.data_processing import build_export_tables, prepare_df_for_export
 
-MAX_ROWS = 25
+MAX_ROWS = 30
 
 
 def _cell(v) -> str:
@@ -64,6 +64,13 @@ def build_docx(results: dict) -> bytes:
         elif not chart:
             doc.add_paragraph("No data available for this section.")
 
+    rm = results.get("roadmap") or {}
+    rm_note = (f"Targets are planning goals derived from peer benchmarks, not predictions. Health score: {rm.get('health_score')}/100. "
+               f"Benchmark source: {rm.get('benchmark_source')}.") if rm.get("available") else None
+    section("Growth roadmap", "Growth Roadmap", "Roadmap",
+            ["Metric", "You", "Benchmark", "Status", "Day 30 target", "Day 60 target", "Day 90 target"], rm_note)
+    section("Priority actions", "Roadmap Actions", None, ["Priority Rank", "Kpi", "Action", "How"])
+    section("30-day action plan", "Daily Plan", None, ["Day", "Date", "Focus", "Task", "Deliverable"])
     section("1. Channel overview", "Channel Overview", note="Lifetime figures describe the whole channel; sample figures describe only the selected videos.")
     section("2. Video performance", "Video Performance", "Views timeline",
             ["Title", "Published (UTC)", "Views (public)", "Views per day", "Relative to median", "Format", "Performance flag"],

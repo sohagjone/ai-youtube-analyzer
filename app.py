@@ -1,4 +1,4 @@
-"""AI YouTube Channel Analyzer - Streamlit app (public YouTube data + optional AI)."""
+"""AI YouTube Channel Analyzer - Streamlit app (public YouTube data, automatic competitor discovery, growth roadmap)."""
 from __future__ import annotations
 
 import os
@@ -6,47 +6,54 @@ from datetime import date, datetime, time, timedelta, timezone
 
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
 import requests
 import streamlit as st
 
 from src import content_gap_analysis as gaps_a
 from src import content_strategy as strat
+from src import roadmap as rm
 from src import title_analysis as ta
 from src.ai_provider import AIProvider, AIProviderError
-from src.pipeline import apply_manual_topics, recompute_topics, run_analysis
+from src.config import YOUTUBE_KEY_NAMES, is_truthy, read_setting, resolve_data_mode
+from src.pipeline import apply_manual_topics, recompute_topics, refresh_roadmap, run_analysis
 from src.sample_data import SampleClient
 from src.topic_analysis import parse_topic_mapping
 from src.youtube_api import (InvalidAPIKeyError, MissingAPIKeyError, QuotaExceededError, YouTubeAPIError,
                              YouTubeClient, estimate_quota)
-from utils.data_processing import df_to_csv_bytes, format_duration, format_number, results_to_json_bytes
+from utils.data_processing import df_to_csv_bytes, format_number, results_to_json_bytes
 from utils.export_excel import build_workbook
 from utils.export_pdf import build_pdf
 from utils.export_word import build_docx
+from utils.theme import COLORWAY, CSS, PALETTE, card, hero, kpi_card, section
 
 st.set_page_config(page_title="AI YouTube Channel Analyzer", page_icon="📊", layout="wide")
-RED = ["#d62828", "#8d99ae", "#f77f00", "#003049", "#6a994e"]
+st.markdown(CSS, unsafe_allow_html=True)
 
 
-# --------------------------------------------------------------------------- helpers
-def get_secret(name: str) -> str:
-    """Secrets file (Streamlit Cloud) first, then environment variables. Never printed or exported."""
+# --------------------------------------------------------------------------- configuration (no user key prompts)
+def _secrets():
     try:
-        value = st.secrets.get(name)
-        if value:
-            return str(value)
-    except Exception:  # noqa: BLE001 - no secrets file configured
-        pass
-    return os.environ.get(name, "")
+        return st.secrets
+    except Exception:  # noqa: BLE001 - no secrets file
+        return None
 
 
 def youtube_key() -> str:
-    return st.session_state.get("session_yt_key") or get_secret("YOUTUBE_API_KEY")
+    for name in YOUTUBE_KEY_NAMES:
+        v = read_setting(name, _secrets())
+        if v:
+            return v
+    return ""
+
+
+def data_mode() -> str:
+    force = is_truthy(read_setting("USE_SAMPLE_DATA", _secrets()))
+    return resolve_data_mode(youtube_key(), force)
 
 
 def ai_provider() -> AIProvider | None:
-    cfg = {k: get_secret(k) for k in ("AI_PROVIDER", "AI_API_KEY", "AI_MODEL", "ANTHROPIC_API_KEY", "OPENAI_API_KEY")}
-    if st.session_state.get("session_ai_key"):
-        cfg["AI_API_KEY"] = st.session_state["session_ai_key"]
+    cfg = {k: read_setting(k, _secrets()) for k in ("AI_PROVIDER", "AI_API_KEY", "AI_MODEL", "ANTHROPIC_API_KEY", "OPENAI_API_KEY")}
     try:
         prov = AIProvider.from_config(cfg)
     except AIProviderError:
@@ -54,6 +61,7 @@ def ai_provider() -> AIProvider | None:
     return prov if prov.is_configured else None
 
 
+# --------------------------------------------------------------------------- helpers
 def show_df(df: pd.DataFrame, link_cols: tuple[str, ...] = ("url", "top_video_url"), height: int | None = None) -> None:
     cfg = {c: st.column_config.LinkColumn(c.replace("_", " ").title(), display_text="open") for c in link_cols if c in df.columns}
     for c in df.columns:
@@ -69,38 +77,42 @@ def csv_button(label: str, df: pd.DataFrame, name: str, key: str) -> None:
 
 
 def reset_analysis() -> None:
-    for k in ("results", "exports", "exports_version", "search_results", "tpl_text"):
+    for k in ("results", "exports", "exports_version", "tpl_text", "plan_progress"):
         st.session_state.pop(k, None)
 
 
-def metric(col, label: str, value, help_text: str | None = None) -> None:
-    col.metric(label, value, help=help_text)
+def cards(items: list[tuple[str, str, str]]) -> None:
+    cols = st.columns(len(items))
+    for i, (col, (label, value, sub)) in enumerate(zip(cols, items)):
+        col.markdown(kpi_card(label, value, sub, i), unsafe_allow_html=True)
+
+
+def style(fig, title: str | None = None):
+    fig.update_layout(template="plotly_white", colorway=COLORWAY, title=title or fig.layout.title.text,
+                      margin=dict(l=10, r=10, t=50, b=10), font=dict(color=PALETTE["navy"]))
+    return fig
 
 
 # --------------------------------------------------------------------------- sidebar
 def sidebar() -> dict | None:
-    st.sidebar.title("📊 Channel Analyzer")
-    key_ok = bool(youtube_key())
-    with st.sidebar.expander("API configuration", expanded=not key_ok):
-        st.caption("Keys are read from Streamlit secrets or environment variables. You may also paste a key for this browser session only (never stored or exported).")
-        st.text_input("YouTube Data API key (session only)", type="password", key="session_yt_key")
-        st.text_input("AI provider key (optional, session only)", type="password", key="session_ai_key")
-    st.sidebar.markdown(f"**YouTube API:** {'✅ configured' if key_ok else '⚠️ not configured'}")
+    st.sidebar.markdown("## 📊 Channel Analyzer")
+    mode = data_mode()
+    if mode == "live":
+        st.sidebar.markdown("🟢 **Live YouTube data**")
+    else:
+        st.sidebar.markdown("🟠 **Demo mode** (illustrative data)")
+        st.sidebar.caption("No YouTube API key is configured on the server, so the app shows clearly-labelled sample data. The app owner adds the key in Streamlit secrets.")
     prov = ai_provider()
-    st.sidebar.markdown(f"**AI features:** {'✅ ' + prov.provider + ' / ' + prov.model if prov else '➖ off (core analysis still works)'}")
-
+    st.sidebar.caption("✨ AI writing assistant: " + (f"on ({prov.provider})" if prov else "off - everything else works without it"))
     with st.sidebar.form("analysis_form"):
-        channel = st.text_input("Your channel (URL, @handle or channel ID)", placeholder="https://www.youtube.com/@yourchannel")
-        competitors = st.text_area("Competitor channels (up to 5, one per line)", height=110, placeholder="@competitor1\nhttps://www.youtube.com/@competitor2")
-        sample_size = st.slider("Videos per channel (sample size)", 10, 200, 50, step=5)
+        channel = st.text_input("Your channel", placeholder="https://www.youtube.com/@yourchannel", help="Channel URL, @handle or channel ID")
+        sample_size = st.slider("Videos analysed per channel", 10, 200, 50, step=5)
+        n_comp = st.slider("Competitors to discover automatically", 10, 20, 10)
         use_dates = st.checkbox("Limit to a date range")
         dr = st.date_input("Date range", value=(date.today() - timedelta(days=365), date.today()), disabled=not use_dates)
-        sample_mode = st.checkbox("Use clearly-labelled SAMPLE data (no API key needed)", value=not key_ok,
-                                  help="Illustrative fake data for trying the app. Never mix it up with real results.")
-        submitted = st.form_submit_button("Run analysis", type="primary")
-    if key_ok and not sample_mode:
-        n_comp = len([c for c in competitors.splitlines() if c.strip()][:5])
-        st.sidebar.caption(f"Estimated API quota for this run: about {estimate_quota(sample_size, 1 + n_comp)} of 10,000 daily units.")
+        submitted = st.form_submit_button("🚀 Analyse my channel")
+    if mode == "live":
+        st.sidebar.caption(f"Approx. YouTube quota for this run: {estimate_quota(sample_size, 1) + 400 + estimate_quota(min(sample_size, 40), n_comp)} of 10,000 daily units.")
     st.sidebar.button("Start a new analysis", on_click=reset_analysis)
     if not submitted:
         return None
@@ -108,30 +120,23 @@ def sidebar() -> dict | None:
     if use_dates and isinstance(dr, (tuple, list)) and len(dr) == 2:
         date_from = datetime.combine(dr[0], time.min, tzinfo=timezone.utc)
         date_to = datetime.combine(dr[1], time.max, tzinfo=timezone.utc)
-    return {"channel": channel, "competitors": competitors.splitlines(), "sample_size": sample_size,
-            "date_from": date_from, "date_to": date_to, "sample_mode": sample_mode}
+    return {"channel": channel, "sample_size": sample_size, "n_comp": n_comp, "date_from": date_from, "date_to": date_to, "mode": mode}
 
 
 def run_from_form(form: dict) -> None:
     reset_analysis()  # a new analysis never mixes with earlier results
     try:
-        if form["sample_mode"]:
-            client = SampleClient()
-        else:
-            client = YouTubeClient(youtube_key())
+        client = SampleClient() if form["mode"] == "sample" else YouTubeClient(youtube_key())
         bar = st.progress(0.0, text="Starting...")
-        results = run_analysis(client, form["channel"], form["competitors"], form["sample_size"], form["date_from"], form["date_to"],
-                               progress=lambda f, m: bar.progress(min(f, 1.0), text=m))
+        st.session_state["results"] = run_analysis(client, form["channel"], [], form["sample_size"], form["date_from"], form["date_to"],
+                                                    auto_competitors=form["n_comp"], progress=lambda f, m: bar.progress(min(f, 1.0), text=m))
         bar.empty()
-        st.session_state["results"] = results
     except ValueError as exc:
         st.error(f"Input problem: {exc}")
-    except MissingAPIKeyError:
-        st.error("No YouTube API key is configured. Add one in the sidebar/secrets, or tick the SAMPLE-data option to try the app.")
-    except InvalidAPIKeyError as exc:
-        st.error(str(exc))
+    except (MissingAPIKeyError, InvalidAPIKeyError) as exc:
+        st.error(f"The server's YouTube API key is missing or was rejected ({exc}). Please contact the app owner.")
     except QuotaExceededError as exc:
-        st.error(f"{exc} You can switch on SAMPLE-data mode to explore the interface meanwhile.")
+        st.error(f"{exc}")
     except YouTubeAPIError as exc:
         st.error(str(exc))
 
@@ -139,42 +144,142 @@ def run_from_form(form: dict) -> None:
 # --------------------------------------------------------------------------- tabs
 def tab_overview(r: dict) -> None:
     life, samp, freq = r["summary"]["lifetime"], r["summary"]["sample"], r["summary"]["upload_frequency"]
-    st.subheader(life["channel_name"])
+    st.markdown(section(life["channel_name"] or "Channel"), unsafe_allow_html=True)
     if str(r["meta"]["mode"]).startswith("SAMPLE"):
-        st.warning("SAMPLE DATA: everything below is illustrative and is not real YouTube data.")
+        st.warning("DEMO / SAMPLE DATA: everything below is illustrative and is not real YouTube data.")
     for n in r["notes"]:
-        if not n.startswith("SAMPLE") and ": SAMPLE" not in n:
+        if "SAMPLE DATA" not in n and not n.startswith("Competitors were chosen"):
             st.info(n)
     for w in r["warnings"]:
         st.warning(w)
-    st.markdown("##### Lifetime channel statistics (whole channel, public)")
-    c = st.columns(4)
-    metric(c[0], "Subscribers", "Hidden" if life["subscribers_hidden"] else format_number(life["subscribers"]), "Public count; YouTube rounds large numbers.")
-    metric(c[1], "Total views", format_number(life["total_views"]))
-    metric(c[2], "Total videos", format_number(life["total_videos"]))
-    metric(c[3], "Lifetime avg views / video", format_number(life["lifetime_avg_views_per_video"]), "Total views divided by total videos.")
-    st.markdown(f"##### Selected sample ({samp.get('videos_in_sample', 0)} videos)")
+    st.caption("Lifetime channel statistics (whole channel, public)")
+    cards([("Subscribers", "Hidden" if life["subscribers_hidden"] else format_number(life["subscribers"]), "public count"),
+           ("Total views", format_number(life["total_views"]), "lifetime"),
+           ("Total videos", format_number(life["total_videos"]), "lifetime"),
+           ("Avg views / video", format_number(life["lifetime_avg_views_per_video"]), "lifetime total / videos")])
+    st.caption(f"Selected sample ({samp.get('videos_in_sample', 0)} videos)")
     if samp.get("videos_in_sample", 0) == 0:
         st.info("No public videos matched the selected sample/date range.")
         return
-    c = st.columns(4)
-    metric(c[0], "Median views", format_number(samp["median_views"]))
-    metric(c[1], "Mean views", format_number(samp["mean_views"]), "The mean is pulled up by outliers; compare with the median.")
-    metric(c[2], "Uploads / 30 days", "n/a" if freq["uploads_per_30_days"] is None else f"{freq['uploads_per_30_days']:.1f}")
-    metric(c[3], "Short-form share", f"{samp['short_form_share']:.0%}", "Videos of 3 minutes or less (the API has no Shorts flag).")
+    cards([("Median views", format_number(samp["median_views"]), "sample"),
+           ("Mean views", format_number(samp["mean_views"]), "pulled up by outliers"),
+           ("Uploads / 30 days", "n/a" if freq["uploads_per_30_days"] is None else f"{freq['uploads_per_30_days']:.1f}", "from sample dates"),
+           ("Short-form share", f"{samp['short_form_share']:.0%}", "videos of 3 min or less")])
     df = r["videos"]
-    fig = px.bar(df.sort_values("published_at"), x="published_at", y="views", hover_data=["title"], color_discrete_sequence=RED,
-                 title="Public views by upload date (selected sample)")
-    fig.add_hline(y=samp["median_views"], line_dash="dash", annotation_text="sample median")
-    st.plotly_chart(fig, width="stretch")
+    fig = px.scatter(df.sort_values("published_at"), x="published_at", y="views", hover_data=["title"], color="views", size="views", size_max=16,
+                     color_continuous_scale=["#A29BFE", "#6C5CE7", "#0984E3", "#00B894"])
+    fig.add_hline(y=samp["median_views"], line_dash="dash", line_color=PALETTE["pink"], annotation_text="sample median")
+    st.plotly_chart(style(fig, "Public views by upload date (selected sample)"), width="stretch")
     pp = r["publishing_patterns"]
     if len(pp["weekday"]):
-        left, right = st.columns(2)
-        left.plotly_chart(px.bar(pp["weekday"], x="weekday", y="videos", title="Uploads by weekday (UTC)", color_discrete_sequence=RED), width="stretch")
-        right.plotly_chart(px.bar(pp["weekday"], x="weekday", y="median_views", title="Median views by upload weekday (small samples are noisy)", color_discrete_sequence=RED), width="stretch")
+        a, b = st.columns(2)
+        a.plotly_chart(style(px.bar(pp["weekday"], x="weekday", y="videos", color_discrete_sequence=[PALETTE["teal"]]), "Uploads by weekday (UTC)"), width="stretch")
+        b.plotly_chart(style(px.bar(pp["weekday"], x="weekday", y="median_views", color_discrete_sequence=[PALETTE["pink"]]), "Median views by upload weekday (small samples are noisy)"), width="stretch")
     with st.expander("Channel description"):
         st.write(life["description"] or "No description.")
     csv_button("Download overview (CSV)", r["overview_table"], "channel_overview.csv", "dl_overview")
+
+
+def _pct_of_bench(v, bench, higher):
+    if v is None or bench is None or pd.isna(v) or pd.isna(bench) or not v or not bench:
+        return None
+    return (v / bench if higher else bench / v) * 100
+
+
+def tab_roadmap(r: dict) -> None:
+    road = r.get("roadmap") or {}
+    if not road.get("available"):
+        st.info("A roadmap needs at least one analysed video.")
+        return
+    k = road["kpis"]
+    st.markdown(section("Channel health score and growth roadmap"), unsafe_allow_html=True)
+    st.caption(f"Benchmarks: {road['benchmark_source']}. Targets are planning goals derived from peer benchmarks, not predictions or promises.")
+    left, right = st.columns([1, 2])
+    score = road["health_score"]
+    if score is not None:
+        gauge = go.Figure(go.Indicator(mode="gauge+number", value=score, number={"suffix": "/100"},
+                                       gauge={"axis": {"range": [0, 100]}, "bar": {"color": PALETTE["violet"]},
+                                              "steps": [{"range": [0, 40], "color": "#FFE3E3"}, {"range": [40, 70], "color": "#FFF3C4"}, {"range": [70, 100], "color": "#D3F9E8"}]}))
+        gauge.update_layout(height=250, margin=dict(l=30, r=40, t=50, b=0), title="Channel health score", font=dict(color=PALETTE["navy"], size=12))
+        left.plotly_chart(gauge, width="stretch")
+        left.caption("100 = at or above the peer median on every KPI")
+    with right:
+        mo = road["momentum"]
+        behind = k[(k["attainment"].notna()) & (k["attainment"] < 1)]
+        items = [("KPIs behind peers", f"{len(behind)} of {int(k['attainment'].notna().sum())}", "biggest levers first"),
+                 ("Peers analysed", str(len(r["competitors"]) - 1 if len(r["competitors"]) else 0), "auto-discovered")]
+        if mo.get("available") and pd.notna(mo.get("change_pct")):
+            items.append(("Momentum (views/day)", f"{mo['change_pct']:+.0%}", "newer vs older half of sample"))
+        cards(items)
+        with st.expander("How the health score is calculated"):
+            st.markdown("Score = weighted average of **attainment** across KPIs (your value / peer median, capped at 100%; inverted for 'lower is better' KPIs). "
+                        "Weights: uploads 20%, per-day views 20%, views per 1,000 subscribers 20%, engagement 15%, breakout rate 15%, steadiness 10%. "
+                        "Momentum is conservative because newer videos are still accumulating views.")
+            if len(road["health_components"]):
+                show_df(road["health_components"])
+
+    st.markdown(section("KPIs: where you are, the benchmark, and your day 30/60/90 targets"), unsafe_allow_html=True)
+    view = k[["metric", "you", "benchmark", "benchmark_source", "attainment", "status", "target_30", "target_60", "target_90"]].copy()
+    for c in ("you", "benchmark", "target_30", "target_60", "target_90"):
+        view[c] = view[c].astype(float).map(lambda v: float(f"{v:.3g}") if pd.notna(v) else v)
+    st.dataframe(view, hide_index=True, width="stretch",
+                 column_config={"metric": "Metric", "you": "You", "benchmark": "Benchmark", "benchmark_source": "Benchmark source", "status": "Status",
+                                "target_30": "Day 30 target", "target_60": "Day 60 target", "target_90": "Day 90 target",
+                                "attainment": st.column_config.ProgressColumn("Attainment", min_value=0.0, max_value=1.0, format="percent")})
+    chart_rows = []
+    for row in k.itertuples():
+        for lab, col in (("Today", "you"), ("Day 30", "target_30"), ("Day 60", "target_60"), ("Day 90", "target_90")):
+            p = _pct_of_bench(getattr(row, col), row.benchmark, row.higher_is_better)
+            if p is not None:
+                chart_rows.append({"KPI": row.metric.split(" (")[0], "When": lab, "% of peer benchmark": p})
+    if chart_rows:
+        fig = px.bar(pd.DataFrame(chart_rows), x="KPI", y="% of peer benchmark", color="When", barmode="group",
+                     color_discrete_sequence=[PALETTE["violet"], PALETTE["teal"], PALETTE["blue"], PALETTE["pink"]])
+        fig.add_hline(y=100, line_dash="dash", line_color=PALETTE["navy"], annotation_text="peer median")
+        st.plotly_chart(style(fig, "Progress path toward peer benchmark (100% = peer median)"), width="stretch")
+
+    st.markdown(section("Priority actions (largest weighted gap first)"), unsafe_allow_html=True)
+    colors = [PALETTE["coral"], PALETTE["violet"], PALETTE["blue"], PALETTE["teal"], PALETTE["pink"], PALETTE["amber"]]
+    for i, a in enumerate(road["actions"].itertuples()):
+        steps = "".join(f"<li>{s}</li>" for s in a.how.split(" | "))
+        st.markdown(card(f"{a.priority_rank}. {a.action}", f"<b>{a.kpi}</b><br>{a.why}<ul>{steps}</ul><i>Basis: {a.evidence_type}</i>",
+                         colors[i % len(colors)], f"#{a.priority_rank}"), unsafe_allow_html=True)
+
+    st.markdown(section("Day-by-day plan for the next 30 days"), unsafe_allow_html=True)
+    plan = road["daily_plan"]
+    phase = st.multiselect("Phase", list(plan["phase"].unique()), default=list(plan["phase"].unique()))
+    edited = st.data_editor(plan[plan["phase"].isin(phase)], hide_index=True, width="stretch", key="plan_editor",
+                            disabled=[c for c in plan.columns if c != "done"],
+                            column_config={"done": st.column_config.CheckboxColumn("Done"), "task": st.column_config.TextColumn("Task", width="large")})
+    done_pct = float(edited["done"].mean()) if len(edited) else 0.0
+    st.progress(done_pct, text=f"Plan progress: {done_pct:.0%} of the selected days completed (tick the boxes as you go)")
+    st.caption(f"Total planned effort: about {int(plan['est_minutes'].sum() / 60)} hours over 30 days. Uploads are placed on days that match the day-30 cadence goal.")
+    csv_button("Download 30-day plan (CSV)", plan, "daily_plan.csv", "dl_plan")
+
+    st.markdown(section("90-day milestones"), unsafe_allow_html=True)
+    ph = road["phases"]
+    if len(ph):
+        pivot = ph.pivot_table(index="metric", columns="milestone", values="target", aggfunc="first")
+        cur = ph.drop_duplicates("metric").set_index("metric")["current"].rename("Today")
+        st.dataframe(pd.concat([cur, pivot], axis=1).reset_index(), hide_index=True, width="stretch")
+        for m, f in ph.drop_duplicates("milestone")[["milestone", "focus"]].itertuples(index=False):
+            st.markdown(f"- **{m}:** {f}")
+
+    st.markdown(section("What-if calculator (planning arithmetic, not a forecast)"), unsafe_allow_html=True)
+    uplift = st.slider("Assumed improvement in median views per video from better packaging", 0, 30, 10, step=5, format="%d%%") / 100
+    sc = rm.build_scenarios(k, float(r["videos"]["views"].median()), uplift)
+    if len(sc):
+        fig = px.bar(sc, x="scenario", y="views_from_new_videos", color="scenario", color_discrete_sequence=[PALETTE["slate"], PALETTE["teal"], PALETTE["violet"]])
+        fig.update_layout(showlegend=False)
+        st.plotly_chart(style(fig, "Views from videos published in the next 90 days (videos x median views)"), width="stretch")
+        st.dataframe(sc.drop(columns=["note"]), hide_index=True, width="stretch")
+        st.caption(sc["note"].iloc[0])
+    with st.expander("Notes and limits"):
+        for n in road["notes"]:
+            st.markdown(f"- {n}")
+    if st.button("Save this assumption into the exports"):
+        refresh_roadmap(r, uplift)
+        st.rerun()
 
 
 def tab_videos(r: dict) -> None:
@@ -186,7 +291,7 @@ def tab_videos(r: dict) -> None:
         st.markdown("- **Views per day** = public views / days since publication (min 1 day). Older videos have had longer to accumulate views.\n"
                     "- **Relative to median** = views / median views of this sample.\n"
                     "- **Engagement rate** = (likes + comments) / views using whatever is public; blank when both are hidden.\n"
-                    "- **Below typical** = 0.5x median or less *and* older than 30 days; newer videos are marked *too new to judge*.\n"
+                    "- **Below typical** = 0.5x median or less *and* older than 30 days; newer videos are *too new to judge*.\n"
                     "- Public views are **not** watch time, retention or click-through rate.")
     c1, c2 = st.columns(2)
     fmts = c1.multiselect("Format", sorted(df["format"].unique()), default=sorted(df["format"].unique()))
@@ -197,8 +302,8 @@ def tab_videos(r: dict) -> None:
     show_df(view[cols], height=380)
     csv_button("Download video data (CSV)", view[cols], "video_performance.csv", "dl_videos")
     a, b = st.columns(2)
-    a.plotly_chart(px.histogram(view, x="relative_to_median", nbins=20, title="Distribution: views relative to sample median", color_discrete_sequence=RED), width="stretch")
-    b.plotly_chart(px.scatter(view, x="age_days", y="views", hover_data=["title"], title="Views vs video age (days)", color_discrete_sequence=RED, log_y=True), width="stretch")
+    a.plotly_chart(style(px.histogram(view, x="relative_to_median", nbins=20, color_discrete_sequence=[PALETTE["violet"]]), "Distribution: views relative to sample median"), width="stretch")
+    b.plotly_chart(style(px.scatter(view, x="age_days", y="views", hover_data=["title"], color="format", log_y=True, color_discrete_sequence=COLORWAY), "Views vs video age (days)"), width="stretch")
     left, right = st.columns(2)
     left.markdown("**Most-viewed in sample**")
     left.dataframe(r["top_videos"][["title", "views", "relative_to_median"]].head(5), hide_index=True, width="stretch")
@@ -214,7 +319,7 @@ def tab_titles(r: dict) -> None:
     if df.empty:
         st.info("No videos to analyse.")
         return
-    st.caption("Patterns are observational. They show what co-occurs with higher or lower views in this sample, not what causes it. Groups under 3 videos are flagged.")
+    st.caption("Patterns are observational: they show what co-occurs with higher or lower views in this sample, not what causes it. Groups under 3 videos are flagged.")
     show_df(r["title_patterns"])
     csv_button("Download title patterns (CSV)", r["title_patterns"], "title_patterns.csv", "dl_titlepat")
     flagged = df[df["wording_flags"] != ""][["title", "wording_flags", "views"]]
@@ -226,15 +331,13 @@ def tab_titles(r: dict) -> None:
     b.markdown("**Repeated openings**")
     b.dataframe(r["repeated_structures"], hide_index=True, width="stretch") if len(r["repeated_structures"]) else b.write("None found.")
 
-    st.markdown("---")
-    st.markdown("#### Title ideas for a selected video")
-    options = df["title"].tolist()
-    pick = st.selectbox("Choose a video", options)
+    st.markdown(section("Title ideas for a selected video"), unsafe_allow_html=True)
+    pick = st.selectbox("Choose a video", df["title"].tolist())
     row = df[df["title"] == pick].iloc[0]
-    kws = df.attrs.get("title_keywords") or r["videos"].attrs.get("title_keywords") or []
+    kws = df.attrs.get("title_keywords") or []
     ideas = ta.suggest_titles_rule_based(pick, kws)
     prov = ai_provider()
-    if st.button("Generate AI alternatives", disabled=prov is None, help=None if prov else "Configure an AI key to enable"):
+    if st.button("Generate AI alternatives", disabled=prov is None, help=None if prov else "AI assistant is not configured"):
         try:
             with st.spinner("Asking the AI provider..."):
                 r["title_suggestions"][pick] = ta.suggest_titles_ai(prov, pick, row["description"])
@@ -242,13 +345,12 @@ def tab_titles(r: dict) -> None:
             st.warning(f"AI suggestions unavailable ({exc}); showing rule-based starting points.")
     shown = r["title_suggestions"].get(pick) or ideas
     label = "AI-generated" if pick in r["title_suggestions"] else "Rule-based starting points"
-    st.caption(f"{label}: recommendations, not guaranteed improvements. Check each still describes what the video actually delivers.")
+    st.caption(f"{label}: recommendations, not guaranteed improvements. Check each still describes what the video delivers.")
     for i, idea in enumerate(shown, 1):
         st.markdown(f"**{i}. {idea['title']}**  \n{idea['improvement']}")
 
-    st.markdown("---")
-    st.markdown("#### Thumbnail statistics (optional)")
-    st.caption("Simple image statistics from public thumbnails (brightness, contrast, saturation, edge busyness). Text density needs OCR and is not computed. These say nothing about click-through rate.")
+    st.markdown(section("Thumbnail statistics (optional)"), unsafe_allow_html=True)
+    st.caption("Simple image statistics from public thumbnails (brightness, contrast, saturation, edge busyness). Text density is not measured and none of this says anything about click-through rate.")
     if st.button("Analyse up to 20 thumbnails"):
         def fetch(url: str) -> bytes:
             resp = requests.get(url, timeout=8)
@@ -257,7 +359,7 @@ def tab_titles(r: dict) -> None:
         with st.spinner("Downloading thumbnails..."):
             r["thumbnails"] = ta.analyze_thumbnails(df, fetch, limit=20)
         if r["thumbnails"].empty:
-            st.info("No thumbnails could be analysed (sample data has none, or downloads failed).")
+            st.info("No thumbnails could be analysed (demo data has none, or downloads failed).")
     if len(r["thumbnails"]):
         st.dataframe(r["thumbnails"], hide_index=True, width="stretch")
         st.write("Spread across videos (lower = more consistent):", ta.thumbnail_consistency(r["thumbnails"]))
@@ -273,13 +375,13 @@ def tab_topics(r: dict) -> None:
     csv_button("Download topic analysis (CSV)", r["topics"], "topic_analysis.csv", "dl_topics")
     t = r["topics"]
     a, b = st.columns(2)
-    a.plotly_chart(px.bar(t, x="topic", y="videos", title="Videos per topic", color_discrete_sequence=RED), width="stretch")
-    b.plotly_chart(px.bar(t, x="topic", y="median_views", title="Median views per topic", color_discrete_sequence=RED), width="stretch")
+    a.plotly_chart(style(px.bar(t, x="topic", y="videos", color="topic", color_discrete_sequence=COLORWAY), "Videos per topic"), width="stretch")
+    b.plotly_chart(style(px.bar(t, x="topic", y="median_views", color="topic", color_discrete_sequence=COLORWAY), "Median views per topic"), width="stretch")
     if len(r["topic_trend"]):
         st.markdown("**Recent vs older content** (topic share in the newer vs older half of the sample)")
         show_df(r["topic_trend"])
     with st.expander("Inspect and correct categories"):
-        st.markdown("Define your own topics (one per line, `Topic: keyword, keyword`) or correct individual videos.")
+        st.markdown("Define your own topics (one per line, `Topic: keyword, keyword`) or correct individual videos. The roadmap and content gaps update.")
         text = st.text_area("Custom topic keywords", key="tpl_text", height=110, placeholder="Espresso: espresso, shot, crema\nGear: grinder, machine")
         if st.button("Re-group using my keywords"):
             recompute_topics(r, parse_topic_mapping(text) or None)
@@ -296,15 +398,24 @@ def tab_topics(r: dict) -> None:
 def tab_competitors(r: dict) -> None:
     comp = r["competitors"]
     if comp.empty:
-        st.info("Add up to five competitor channels in the sidebar and run the analysis to see a comparison.")
+        st.info("No similar channels could be found automatically for this channel (see warnings on the Overview tab).")
         return
+    st.markdown(section("Automatically discovered competitors"), unsafe_allow_html=True)
+    st.caption("The app searches recent videos on your own topics, collects the channels behind them and keeps the best topical and audience-size matches. "
+               "This is a heuristic: review the list before drawing conclusions.")
+    disc = r["discovered_competitors"]
+    if len(disc):
+        st.dataframe(disc[["channel", "subscribers", "query_hits", "size_similarity", "match_score", "why", "url"]], hide_index=True, width="stretch",
+                     column_config={"url": st.column_config.LinkColumn("Channel", display_text="open"),
+                                    "match_score": st.column_config.ProgressColumn("Match score", min_value=0.0, max_value=1.0)})
+    st.markdown(section("Side-by-side comparison"), unsafe_allow_html=True)
     st.caption("Raw views do not show which creator is better: channels differ in age, audience size, niche and history.")
-    show_df(comp, link_cols=("url", "top_video_url"))
+    show_df(comp)
     csv_button("Download competitor comparison (CSV)", comp, "competitor_comparison.csv", "dl_comp")
     a, b = st.columns(2)
-    a.plotly_chart(px.bar(comp, x="channel", y="median_views", color="role", title="Median views (sample)", color_discrete_sequence=RED), width="stretch")
-    b.plotly_chart(px.bar(comp, x="channel", y="median_views_per_1k_subs", color="role", title="Median views per 1,000 subscribers (rough size adjustment)", color_discrete_sequence=RED), width="stretch")
-    for line in r["competitor_differences"]:
+    a.plotly_chart(style(px.bar(comp, x="channel", y="median_views", color="role", color_discrete_sequence=[PALETTE["violet"], PALETTE["teal"]]), "Median views (sample)"), width="stretch")
+    b.plotly_chart(style(px.bar(comp, x="channel", y="uploads_per_30_days", color="role", color_discrete_sequence=[PALETTE["violet"], PALETTE["teal"]]), "Uploads per 30 days"), width="stretch")
+    for line in r["competitor_differences"][:12]:
         st.markdown(f"- {line}")
     if len(r["competitor_top_videos"]):
         st.markdown("**Highest-viewed recent competitor videos**")
@@ -319,21 +430,23 @@ def tab_gaps(r: dict) -> None:
     gaps = r["gaps"]
     st.info(gaps_a.DISCLAIMER)
     if gaps.empty:
-        st.write("No content-gap ideas could be generated from this sample. Try a larger sample or add competitors.")
+        st.write("No content-gap ideas could be generated from this sample. Try a larger sample.")
         return
     with st.expander("How the priority score works"):
-        st.markdown("Priority (0-100) = **30% relevance** (does the topic sit near your existing vocabulary?) + **30% demand evidence** "
-                    "(competitor videos' performance vs their own channel medians, and how many there are) + **20% differentiation** "
-                    "(how little you cover it) + **20% feasibility** (fit with the format you already make). "
+        st.markdown("Priority (0-100) = **30% relevance** + **30% demand evidence** (competitor videos' performance vs their own channel medians, and how many there are) "
+                    "+ **20% differentiation** (how little you cover it) + **20% feasibility** (fit with the format you already make). "
                     "Confidence reflects how many videos and channels support the idea. There is no search-volume data in this score.")
     prov = ai_provider()
-    if st.button("Refine top ideas with AI", disabled=prov is None, help=None if prov else "Configure an AI key to enable"):
+    if st.button("Refine top ideas with AI", disabled=prov is None, help=None if prov else "AI assistant is not configured"):
         with st.spinner("Asking the AI provider..."):
             r["gaps"] = gaps_a.refine_gaps_with_ai(prov, gaps)
-            r["meta"]["version"] += 1
+            refresh_roadmap(r)
         st.rerun()
     show_df(gaps[["rank", "gap_type", "topic", "suggested_title", "format", "priority_score", "confidence"]])
     csv_button("Download content gaps (CSV)", gaps, "content_gaps.csv", "dl_gaps")
+    fig = px.bar(gaps.head(10).iloc[::-1], x="priority_score", y="topic", orientation="h", color="confidence",
+                 color_discrete_map={"High": PALETTE["teal"], "Medium": PALETTE["amber"], "Low": PALETTE["pink"]})
+    st.plotly_chart(style(fig, "Top opportunities by priority score"), width="stretch")
     for g in gaps.head(10).itertuples():
         with st.expander(f"#{g.rank} {g.topic} - {g.priority_score} ({g.confidence} confidence)"):
             st.markdown(f"**Type:** {g.gap_type}  \n**Audience:** {g.audience}  \n**Format:** {g.format}  \n**Suggested title:** {g.suggested_title} *(recommendation)*")
@@ -357,7 +470,7 @@ def tab_plan(r: dict) -> None:
     formats = st.multiselect("Formats", strat.FORMATS, default=strat.FORMATS[:3])
     goals = st.multiselect("Goals", list(strat.CTAS), default=["subscribers"])
     prov = ai_provider()
-    use_ai = st.checkbox("Refine wording with AI", value=False, disabled=prov is None, help=None if prov else "Configure an AI key to enable")
+    use_ai = st.checkbox("Refine wording with AI", value=False, disabled=prov is None, help=None if prov else "AI assistant is not configured")
     if st.button("Generate content calendar", type="primary"):
         r["calendar"] = strat.generate_calendar(r["gaps"], r["topics"], days=horizon, posts_per_week=ppw, formats=formats, niche=niche,
                                                 audience=audience, goals=goals, language=language, provider=prov if use_ai else None)
@@ -370,40 +483,14 @@ def tab_plan(r: dict) -> None:
         st.info("Generate a calendar to see recommended topics, titles, hooks, talking points and a publishing sequence.")
 
 
-def tab_search() -> None:
-    st.caption("Keyword search uses the official API (100 quota units per search). Results are not a complete list of videos and are not a reliable ranking of audience demand.")
-    c1, c2, c3 = st.columns([3, 1, 1])
-    q = c1.text_input("Keyword or topic")
-    order = c2.selectbox("Order", ["relevance", "viewCount", "date"])
-    n = c3.slider("Results", 5, 50, 20)
-    use_sample = c3.checkbox("Sample data", value=not youtube_key(), key="search_sample")
-    if st.button("Search"):
-        try:
-            client = SampleClient() if use_sample else YouTubeClient(youtube_key())
-            vids = client.search_videos(q, n, order)
-            df = pd.DataFrame(vids)
-            if df.empty:
-                st.info("No videos found.")
-            else:
-                df["published_at"] = pd.to_datetime(df["published_at"], utc=True)
-                df["duration"] = df["duration_seconds"].apply(format_duration)
-                st.session_state["search_results"] = df[["title", "channel_title", "url", "published_at", "views", "duration", "category"]]
-        except (YouTubeAPIError, ValueError) as exc:
-            st.error(f"{exc}  A SAMPLE-data option is available above.")
-    res = st.session_state.get("search_results")
-    if res is not None:
-        show_df(res)
-        csv_button("Download search results (CSV)", res, "search_results.csv", "dl_search")
-
-
 def tab_export(r: dict) -> None:
-    st.markdown("#### Sources")
+    st.markdown(section("Sources"), unsafe_allow_html=True)
     for s in r["sources"]:
         st.markdown(f"- {s['type']}: **{s['item']}** - {s['detail']}")
     with st.expander("Limitations and methodology notes", expanded=True):
         for lim in r["limitations"]:
             st.markdown(f"- {lim}")
-    st.markdown("#### Downloads")
+    st.markdown(section("Downloads"), unsafe_allow_html=True)
     st.caption("Files are built once from the stored results (no API or AI calls are repeated). No API keys are ever included.")
     version = r["meta"]["version"]
     if st.button("Build / refresh export files", type="primary"):
@@ -412,7 +499,7 @@ def tab_export(r: dict) -> None:
             st.session_state["exports_version"] = version
     ex = st.session_state.get("exports")
     if ex and st.session_state.get("exports_version") != version:
-        st.warning("Results changed since these files were built (e.g. calendar or topics). Click the button above to refresh them.")
+        st.warning("Results changed since these files were built (e.g. calendar, topics or roadmap). Click the button above to refresh them.")
     if ex:
         c = st.columns(4)
         c[0].download_button("PDF report", ex["pdf"], "youtube_channel_report.pdf", "application/pdf", key="dl_pdf")
@@ -422,13 +509,15 @@ def tab_export(r: dict) -> None:
                              "application/vnd.openxmlformats-officedocument.wordprocessingml.document", key="dl_docx")
         c[3].download_button("JSON", ex["json"], "youtube_channel_analysis.json", "application/json", key="dl_json")
     st.markdown("**CSV exports**")
-    c = st.columns(3)
+    c = st.columns(4)
     with c[0]:
         csv_button("Video data (CSV)", r["videos"][["title", "url", "published_at", "views", "likes", "comments", "views_per_day", "relative_to_median", "format", "topic"]], "videos.csv", "dl_csv_v")
     with c[1]:
-        csv_button("Competitor comparison (CSV)", r["competitors"], "competitors.csv", "dl_csv_c")
+        csv_button("Competitors (CSV)", r["competitors"], "competitors.csv", "dl_csv_c")
     with c[2]:
         csv_button("Content gaps (CSV)", r["gaps"], "content_gaps.csv", "dl_csv_g")
+    with c[3]:
+        csv_button("30-day plan (CSV)", (r.get("roadmap") or {}).get("daily_plan"), "daily_plan.csv", "dl_csv_p")
 
 
 # --------------------------------------------------------------------------- main
@@ -436,23 +525,20 @@ def main() -> None:
     form = sidebar()
     if form:
         run_from_form(form)
-    st.title("AI YouTube Channel Analyzer")
+    st.markdown(hero("AI YouTube Channel Analyzer", "Understand your public performance, benchmark against automatically-found peers, and follow a day-by-day growth roadmap."),
+                unsafe_allow_html=True)
     r = st.session_state.get("results")
     if r is None:
-        st.markdown("Analyse a channel's **public** performance, compare competitors, find content gaps and plan what to publish next.")
-        st.info("Enter a channel in the sidebar and press **Run analysis**. With no API key, tick the SAMPLE-data option to explore the app with clearly-labelled illustrative data.")
+        cards([("1  Enter your channel", "Paste a link", "URL, @handle or ID"), ("2  Auto benchmark", "10+ peers", "found by topic match"),
+               ("3  Growth roadmap", "Day by day", "targets from peer KPIs"), ("4  Export", "PDF / Excel", "Word, CSV, JSON")])
+        st.info("Enter your channel in the sidebar and press **Analyse my channel**. Competitors are found for you automatically.")
         st.markdown("**What public data can't tell you:** watch time, impressions, click-through rate, retention, traffic sources and revenue are private to channel owners and are never shown or estimated here.")
-        with st.expander("Keyword search", expanded=False):
-            tab_search()
         return
-    names = ["Overview", "Video Performance", "Title Analysis", "Topics", "Competitors", "Content Gaps", "AI Content Plan", "Search", "Sources and Export"]
+    names = ["Overview", "🚀 Growth Roadmap", "Video Performance", "Title Analysis", "Topics", "Competitors", "Content Gaps", "AI Content Plan", "Sources and Export"]
     tabs = st.tabs(names)
-    for tab, fn in zip(tabs, (tab_overview, tab_videos, tab_titles, tab_topics, tab_competitors, tab_gaps, tab_plan, None, tab_export)):
+    for tab, fn in zip(tabs, (tab_overview, tab_roadmap, tab_videos, tab_titles, tab_topics, tab_competitors, tab_gaps, tab_plan, tab_export)):
         with tab:
-            if fn is None:
-                tab_search()
-            else:
-                fn(r)
+            fn(r)
 
 
 main()

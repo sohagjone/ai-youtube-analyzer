@@ -31,7 +31,7 @@ class SampleClient:
         rng = random.Random(seed)
         pool_key = "own" if rng.random() < 0 else None
         value = ref.value.lower()
-        pool_key = "rival_a" if "rival" in value and value.endswith(("a", "1")) else "rival_b" if "rival" in value else "own" if "own" in value or "sample" in value else "default"
+        pool_key = ("rival_a" if value[-1:] in "a13579" else "rival_b") if "rival" in value else "own" if "own" in value or "sample" in value else "default"
         topics = TOPIC_POOLS[pool_key]
         cid = "UC" + hashlib.sha256(value.encode()).hexdigest()[:22]
         subs = rng.randint(8_000, 400_000)
@@ -68,8 +68,14 @@ class SampleClient:
         }
         return {"channel": channel, "videos": videos, "notes": ["SAMPLE DATA - illustrative only, not real YouTube data."]}
 
-    def search_videos(self, query: str, max_results: int = 25, order: str = "relevance", published_after=None) -> list[dict]:
-        bundle = self.fetch_channel_bundle(ParsedChannel("handle", "@" + query.replace(" ", "")[:20] or "@sample"), max_results)
-        for v in bundle["videos"]:
-            v["title"] = f"[SAMPLE] {v['title']}"
-        return bundle["videos"][:max_results]
+    def find_channel_candidates(self, queries: list[str], max_per_query: int = 50, published_after=None) -> list[dict]:
+        """Illustrative stand-in for competitor discovery: 14 fake channels with declining 'hits'."""
+        return [{"channel_id": f"rival_{i:02d}", "title": f"[SAMPLE] Rival_{i:02d}", "hits": max(1, 14 - i)} for i in range(1, 15)]
+
+    def get_channels_by_ids(self, channel_ids: list[str]) -> list[dict]:
+        out = []
+        for cid in channel_ids:
+            ch = self.fetch_channel_bundle(ParsedChannel("handle", "@" + cid), 12)["channel"]
+            ch["_query_id"] = cid
+            out.append(ch)
+        return out

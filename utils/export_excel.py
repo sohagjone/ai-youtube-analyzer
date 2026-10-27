@@ -25,6 +25,8 @@ def _number_format(name: str) -> str | None:
     n = name.lower()
     if any(k in n for k in ("rate", "share", "ratio")) and "per" not in n:
         return "0.0%"
+    if "attainment" in n:
+        return "0%"
     if "relative" in n or "score" in n or "similarity" in n or n in ("relevance", "demand evidence", "differentiation", "feasibility"):
         return "0.00"
     if any(k in n for k in ("views", "subscribers", "likes", "comments", "videos", "characters", "words")):
@@ -75,8 +77,8 @@ def build_workbook(results: dict) -> bytes:
     wb = Workbook()
     wb.remove(wb.active)
     tables = build_export_tables(results)
-    for name in ("Channel Overview", "Video Performance", "Title Analysis", "Title Patterns", "Topic Analysis",
-                 "Competitors", "Content Gaps", "Content Calendar", "Sources and Notes"):
+    for name in ("Channel Overview", "Growth Roadmap", "Roadmap Actions", "Daily Plan", "Video Performance", "Title Analysis", "Title Patterns", "Topic Analysis",
+                 "Competitors", "Auto Competitors", "Content Gaps", "Content Calendar", "Sources and Notes"):
         if name in tables:
             _write_sheet(wb, name, tables[name])
     buf = io.BytesIO()

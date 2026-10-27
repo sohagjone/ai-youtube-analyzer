@@ -8,7 +8,9 @@ import pandas as pd
 
 from src import channel_analysis as ca
 from src import competitor_analysis as comp_a
+from src import competitor_discovery as disc
 from src import content_gap_analysis as gaps_a
+from src import roadmap as rm
 from src import title_analysis as ta
 from src import topic_analysis as topa
 from src import video_analysis as va
@@ -35,6 +37,7 @@ def _prepare(bundle: dict, now: datetime | None) -> tuple[dict, pd.DataFrame]:
 def run_analysis(client: Any, channel_input: str, competitor_inputs: list[str] | None = None, sample_size: int = 50,
                  date_from: datetime | None = None, date_to: datetime | None = None,
                  topic_mapping: dict[str, list[str]] | None = None, now: datetime | None = None,
+                 auto_competitors: int = 0, competitor_sample_size: int | None = None,
                  progress: Callable[[float, str], None] | None = None) -> dict[str, Any]:
     """Run everything. Raises ValueError (bad input) or YouTubeAPIError (API problem) for the main channel;
     competitor failures are recorded as warnings so the rest of the analysis still completes."""
@@ -43,6 +46,7 @@ def run_analysis(client: Any, channel_input: str, competitor_inputs: list[str] |
     own_ref = parse_channel_input(channel_input)
     comp_refs, input_errors = parse_many(competitor_inputs or [], limit=5)
     warnings: list[str] = list(input_errors)
+    comp_sample = competitor_sample_size or min(sample_size, 40)
 
     step(0.05, "Fetching your channel and videos...")
     bundle = client.fetch_channel_bundle(own_ref, sample_size, date_from, date_to)
@@ -55,11 +59,21 @@ def run_analysis(client: Any, channel_input: str, competitor_inputs: list[str] |
     topic_tbl = topa.topic_summary(own_df)
     summary = ca.summarize_channel(channel, own_df)
 
+    discovered = pd.DataFrame()
+    if auto_competitors > 0:
+        step(0.38, "Finding similar channels automatically...")
+        try:
+            refs, discovered, d_notes = disc.discover_competitors(client, channel, own_df, topic_tbl, n=auto_competitors, now=now)
+            notes += d_notes
+            comp_refs = comp_refs + [r for r in refs if r.value not in {c.value for c in comp_refs}]
+        except YouTubeAPIError as exc:
+            warnings.append(f"Automatic competitor discovery failed: {exc}")
+
     competitors: dict[str, tuple[dict, pd.DataFrame]] = {}
     for k, ref in enumerate(comp_refs):
         step(0.4 + 0.35 * (k / max(len(comp_refs), 1)), f"Fetching competitor {k + 1} of {len(comp_refs)}...")
         try:
-            b = client.fetch_channel_bundle(ref, sample_size, date_from, date_to)
+            b = client.fetch_channel_bundle(ref, comp_sample, date_from, date_to)
         except (YouTubeAPIError, ValueError) as exc:
             warnings.append(f"Competitor '{ref.value}' skipped: {exc}")
             continue
@@ -80,7 +94,7 @@ def run_analysis(client: Any, channel_input: str, competitor_inputs: list[str] |
     results: dict[str, Any] = {
         "meta": {
             "analysis_date": now.isoformat(), "mode": "SAMPLE DATA (illustrative)" if is_sample else "live",
-            "channel_input": channel_input, "competitor_inputs": [r.value for r in comp_refs], "sample_size_requested": sample_size,
+            "channel_input": channel_input, "competitor_inputs": [r.value for r in comp_refs], "auto_competitors_requested": auto_competitors, "sample_size_requested": sample_size,
             "date_from": date_from.isoformat() if date_from else None, "date_to": date_to.isoformat() if date_to else None,
             "topic_method": "custom keyword mapping" if topic_mapping else "automatic keyword clustering",
             "version": 1,
@@ -102,6 +116,7 @@ def run_analysis(client: Any, channel_input: str, competitor_inputs: list[str] |
         "competitor_videos": {n: d for n, (_, d) in competitors.items()},
         "competitor_channels": {n: c for n, (c, _) in competitors.items()},
         "competitor_differences": comp_a.strategy_differences(comparison) if len(comparison) else [],
+        "discovered_competitors": discovered,
         "competitor_top_videos": comp_a.top_competitor_videos(competitors) if competitors else pd.DataFrame(),
         "gaps": gaps,
         "calendar": pd.DataFrame(),
@@ -112,7 +127,19 @@ def run_analysis(client: Any, channel_input: str, competitor_inputs: list[str] |
         "limitations": BASE_LIMITATIONS + (comp_a.LIMITATIONS if competitors else []),
         "sources": _sources(channel, competitors),
     }
+    results["roadmap"] = _roadmap(results)
     step(1.0, "Done")
+    return results
+
+
+def _roadmap(results: dict, uplift: float = 0.10) -> dict:
+    return rm.build_roadmap(results["videos"], results["channel"], results["competitors"], results["topics"], results["title_patterns"],
+                            results["publishing_patterns"], results["gaps"], results["format_comparison"], uplift=uplift)
+
+
+def refresh_roadmap(results: dict, uplift: float = 0.10) -> dict:
+    results["roadmap"] = _roadmap(results, uplift)
+    results["meta"]["version"] += 1
     return results
 
 
@@ -124,6 +151,7 @@ def recompute_topics(results: dict, mapping: dict[str, list[str]] | None) -> dic
     results["topic_trend"] = topa.recent_vs_older(df)
     results["gaps"] = gaps_a.find_content_gaps(df, results["competitor_videos"], results["topics"])
     results["meta"]["topic_method"] = "custom keyword mapping" if mapping else "automatic keyword clustering"
+    results["roadmap"] = _roadmap(results)
     results["meta"]["version"] += 1
     return results
 
@@ -138,6 +166,7 @@ def apply_manual_topics(results: dict, overrides: dict[str, str]) -> dict:
     results["topic_trend"] = topa.recent_vs_older(df)
     results["gaps"] = gaps_a.find_content_gaps(df, results["competitor_videos"], results["topics"])
     results["meta"]["topic_method"] = "automatic/custom grouping with manual corrections"
+    results["roadmap"] = _roadmap(results)
     results["meta"]["version"] += 1
     return results
 

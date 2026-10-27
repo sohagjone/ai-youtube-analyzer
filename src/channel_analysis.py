@@ -14,7 +14,7 @@ WEEKDAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 def upload_frequency(df: pd.DataFrame) -> dict:
     """Uploads per 30 days (from gaps between uploads in the sample) and gap statistics."""
     if len(df) < 2:
-        return {"uploads_per_30_days": None, "median_gap_days": None, "days_since_last_upload": None}
+        return {"uploads_per_30_days": None, "median_gap_days": None, "days_since_last_upload": None, "gap_cv": None}
     dates = df["published_at"].sort_values()
     span_days = max((dates.iloc[-1] - dates.iloc[0]).total_seconds() / 86400, 1.0)
     gaps = dates.diff().dropna().dt.total_seconds() / 86400
@@ -23,6 +23,8 @@ def upload_frequency(df: pd.DataFrame) -> dict:
         "uploads_per_30_days": float((len(dates) - 1) / span_days * 30),
         "median_gap_days": float(gaps.median()),
         "days_since_last_upload": float((now - dates.iloc[-1]).total_seconds() / 86400),
+        # coefficient of variation of gaps between uploads: lower = steadier schedule
+        "gap_cv": float(gaps.std(ddof=0) / gaps.mean()) if len(gaps) >= 2 and gaps.mean() > 0 else None,
     }
 
 

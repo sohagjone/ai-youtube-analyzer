@@ -9,7 +9,8 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 import pandas as pd  # noqa: E402
 
-ACCENT, GREY = "#d62828", "#8d99ae"
+ACCENT, GREY = "#6C5CE7", "#A29BFE"
+TEAL, PINK, BLUE = "#00B894", "#FD79A8", "#0984E3"
 
 
 def _png(fig) -> bytes:
@@ -85,8 +86,35 @@ def gap_bar(gaps: pd.DataFrame, n: int = 8) -> bytes | None:
     return _png(fig)
 
 
+def roadmap_chart(roadmap: dict) -> bytes | None:
+    if not roadmap or not roadmap.get("available"):
+        return None
+    k = roadmap["kpis"].dropna(subset=["benchmark", "you", "target_90"])
+    if k.empty:
+        return None
+
+    def pct(v, bench, higher):
+        return (v / bench if higher else bench / v) * 100 if bench and v else 0
+
+    labels = [m.split(" (")[0][:26] for m in k["metric"]]
+    cols = {"Today": "you", "Day 30": "target_30", "Day 60": "target_60", "Day 90": "target_90"}
+    fig, ax = plt.subplots(figsize=(7, 3.4))
+    width = 0.2
+    for i, (lab, col) in enumerate(cols.items()):
+        vals = [pct(r[col], r["benchmark"], r["higher_is_better"]) for _, r in k.iterrows()]
+        ax.bar([x + (i - 1.5) * width for x in range(len(k))], vals, width, label=lab, color=[ACCENT, TEAL, BLUE, PINK][i])
+    ax.axhline(100, color="#2D3436", linestyle="--", linewidth=1)
+    ax.set_xticks(range(len(k)))
+    ax.set_xticklabels(labels, rotation=20, ha="right", fontsize=7)
+    ax.set_ylabel("% of peer benchmark", fontsize=8)
+    ax.set_title("Growth targets vs peer benchmark (100% = peer median)", fontsize=10)
+    ax.legend(fontsize=7)
+    return _png(fig)
+
+
 def build_charts(results: dict) -> dict[str, bytes]:
     charts = {
+        "Roadmap": roadmap_chart(results.get("roadmap")),
         "Views timeline": views_timeline(results.get("videos", pd.DataFrame())),
         "Top videos": top_videos_bar(results.get("videos", pd.DataFrame())),
         "Topics": topic_bar(results.get("topics")),
