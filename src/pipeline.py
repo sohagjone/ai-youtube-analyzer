@@ -10,6 +10,7 @@ from src import channel_analysis as ca
 from src import competitor_analysis as comp_a
 from src import competitor_discovery as disc
 from src import content_gap_analysis as gaps_a
+from src import monetization as mon
 from src import roadmap as rm
 from src import title_analysis as ta
 from src import topic_analysis as topa
@@ -19,7 +20,7 @@ from utils.data_processing import videos_to_df
 from utils.validation import ParsedChannel, parse_channel_input, parse_many
 
 BASE_LIMITATIONS = [
-    "All figures come from public YouTube Data API v3 fields. Watch time, impressions, click-through rate, audience retention, traffic sources and revenue are NOT available unless a channel owner authorises YouTube Analytics access (not used here).",
+    "All figures come from public YouTube Data API v3 fields. Watch time, impressions, click-through rate, audience retention, traffic sources and revenue are NOT available unless a channel owner authorises YouTube Analytics access (not used here). The Income tab therefore shows clearly-labelled ESTIMATES from public data and editable assumptions, never actual revenue.",
     "Lifetime channel statistics (whole channel) are reported separately from statistics of the selected video sample/date range.",
     "Views are cumulative, so older videos have had longer to accumulate; a low-view video is not automatically a failure.",
     "Topic groups come from titles, tags and the start of descriptions (no transcripts); they are approximate.",
@@ -128,6 +129,7 @@ def run_analysis(client: Any, channel_input: str, competitor_inputs: list[str] |
         "sources": _sources(channel, competitors),
     }
     results["roadmap"] = _roadmap(results)
+    results["monetization"] = _monetization(results, now=now)
     step(1.0, "Done")
     return results
 
@@ -137,8 +139,30 @@ def _roadmap(results: dict, uplift: float = 0.10) -> dict:
                             results["publishing_patterns"], results["gaps"], results["format_comparison"], uplift=uplift)
 
 
+def _cadence_ratio(results: dict) -> float:
+    """Day-90 upload goal / current uploads per 30 days from the roadmap (1.5 if unavailable)."""
+    try:
+        k = results["roadmap"]["kpis"].set_index("key").loc["uploads_per_30_days"]
+        return float(k["target_90"] / k["you"]) if k["you"] and k["target_90"] == k["target_90"] else 1.5
+    except (KeyError, TypeError, ZeroDivisionError):
+        return 1.5
+
+
+def _monetization(results: dict, assumptions: dict | None = None, now: datetime | None = None) -> dict:
+    a = {"cadence_ratio": _cadence_ratio(results), **(assumptions or {})}
+    return mon.build_monetization(results["channel"], results["videos"], a, now)
+
+
+def refresh_monetization(results: dict, assumptions: dict) -> dict:
+    """Recompute the income estimate from stored data with new assumptions (no API calls)."""
+    results["monetization"] = _monetization(results, assumptions)
+    results["meta"]["version"] += 1
+    return results
+
+
 def refresh_roadmap(results: dict, uplift: float = 0.10) -> dict:
     results["roadmap"] = _roadmap(results, uplift)
+    results["monetization"] = _monetization(results, results.get("monetization", {}).get("assumptions"))
     results["meta"]["version"] += 1
     return results
 
@@ -152,6 +176,7 @@ def recompute_topics(results: dict, mapping: dict[str, list[str]] | None) -> dic
     results["gaps"] = gaps_a.find_content_gaps(df, results["competitor_videos"], results["topics"])
     results["meta"]["topic_method"] = "custom keyword mapping" if mapping else "automatic keyword clustering"
     results["roadmap"] = _roadmap(results)
+    results["monetization"] = _monetization(results, results.get("monetization", {}).get("assumptions"))
     results["meta"]["version"] += 1
     return results
 
@@ -167,6 +192,7 @@ def apply_manual_topics(results: dict, overrides: dict[str, str]) -> dict:
     results["gaps"] = gaps_a.find_content_gaps(df, results["competitor_videos"], results["topics"])
     results["meta"]["topic_method"] = "automatic/custom grouping with manual corrections"
     results["roadmap"] = _roadmap(results)
+    results["monetization"] = _monetization(results, results.get("monetization", {}).get("assumptions"))
     results["meta"]["version"] += 1
     return results
 

@@ -69,6 +69,10 @@ def build_docx(results: dict) -> bytes:
                f"Benchmark source: {rm.get('benchmark_source')}.") if rm.get("available") else None
     section("Growth roadmap", "Growth Roadmap", "Roadmap",
             ["Metric", "You", "Benchmark", "Status", "Day 30 target", "Day 60 target", "Day 90 target"], rm_note)
+    section("Income estimate (estimate, not actual revenue)", "Income Estimate", None, ["Metric", "Value"],
+            "Estimated from public data and editable assumptions; real income, watch hours and monetization status are private to the channel owner.")
+    section("Income roadmap", "Income Roadmap", None, ["Step", "Milestone", "Target", "Today", "Estimated Date"])
+    section("Time to monetization by scenario", "Income Timeline", None, None)
     section("Priority actions", "Roadmap Actions", None, ["Priority Rank", "Kpi", "Action", "How"])
     section("30-day action plan", "Daily Plan", None, ["Day", "Date", "Focus", "Task", "Deliverable"])
     section("1. Channel overview", "Channel Overview", note="Lifetime figures describe the whole channel; sample figures describe only the selected videos.")

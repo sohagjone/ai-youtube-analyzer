@@ -12,11 +12,12 @@ import streamlit as st
 
 from src import content_gap_analysis as gaps_a
 from src import content_strategy as strat
+from src import monetization as mon
 from src import roadmap as rm
 from src import title_analysis as ta
 from src.ai_provider import AIProvider, AIProviderError
 from src.config import YOUTUBE_KEY_NAMES, is_truthy, read_setting, resolve_data_mode
-from src.pipeline import apply_manual_topics, recompute_topics, refresh_roadmap, run_analysis
+from src.pipeline import apply_manual_topics, recompute_topics, refresh_monetization, refresh_roadmap, run_analysis
 from src.sample_data import SampleClient
 from src.topic_analysis import parse_topic_mapping
 from src.youtube_api import (InvalidAPIKeyError, MissingAPIKeyError, QuotaExceededError, YouTubeAPIError,
@@ -282,6 +283,105 @@ def tab_roadmap(r: dict) -> None:
         st.rerun()
 
 
+def _usd(v: float) -> str:
+    return f"${v:,.0f}" if v >= 100 else f"${v:,.2f}"
+
+
+def tab_income(r: dict) -> None:
+    mo = r.get("monetization") or {}
+    if not mo.get("available"):
+        st.info("The income estimate needs at least one analysed video.")
+        return
+    a, b = mo["assumptions"], mo["baseline"]
+    st.markdown(section("Income estimate and monetization roadmap"), unsafe_allow_html=True)
+    st.warning("**This is an estimate, not your real income.** Revenue, watch hours and monetization status are private to the channel owner (YouTube Studio > Earn). "
+               "Figures below come from public data plus the assumptions you can change here.")
+    with st.expander("Assumptions (change these to match your channel)", expanded=not b["subs_known"]):
+        with st.form("income_assumptions"):
+            c1, c2 = st.columns(2)
+            status = c1.selectbox("Monetization status", list(mon.STATUS_OPTIONS), index=list(mon.STATUS_OPTIONS).index(a["status"]),
+                                  format_func=mon.STATUS_OPTIONS.get)
+            niche = c2.selectbox("Niche (sets the assumed income per 1,000 views)", list(mon.NICHE_RPM), index=list(mon.NICHE_RPM).index(a["niche"]))
+            c3, c4 = st.columns(2)
+            view_pct = c3.slider("Average % of each long video watched", 20, 70, int(round(a["view_pct"] * 100)), step=5) / 100
+            growth = c4.slider("Assumed monthly growth in views", 0, 10, int(round(a["monthly_growth"] * 100)), step=1, format="%d%%") / 100
+            uplift = c3.slider("Packaging uplift in the third scenario", 0, 30, int(round(a["packaging_uplift"] * 100)), step=5, format="%d%%") / 100
+            subs_override = c4.number_input("Your real subscriber count (0 = use public count)", min_value=0, value=int(a["subs_override"]), step=100,
+                                            help="Use this if the creator hides subscribers or you want the exact number from YouTube Studio.")
+            if st.form_submit_button("Update estimate"):
+                refresh_monetization(r, {"status": status, "niche": niche, "view_pct": view_pct, "monthly_growth": growth,
+                                         "packaging_uplift": uplift, "subs_override": int(subs_override)})
+                st.rerun()
+
+    t = mon.ads_threshold(pd.Timestamp.now(tz="UTC"))
+    p, el, gaps = mo["potential_monthly_income"], mo["eligible_now"], mo["gaps"]
+    st.markdown(section("1. How much does this channel earn now?"), unsafe_allow_html=True)
+    if mo["earning_now"]:
+        cards([("Estimated income now / month", f"{_usd(p['low'])} - {_usd(p['high'])}", f"mid {_usd(p['mid'])} (estimate)"),
+               ("Subscribers", format_number(b["subs"]), "public count" if not a["subs_override"] else "entered by you"),
+               ("Est. views per month", format_number(b["long_views_month"] + b["short_views_month"]), "uploads x median views"),
+               ("Assumed income per 1,000 views", f"${mo['rpm']['long'][0]:g} - ${mo['rpm']['long'][2]:g}", a["niche"])])
+    else:
+        why = "estimated to be below the ads thresholds" if mo["status"] == "auto" else "you said it is not monetized yet"
+        cards([("Estimated income now", "$0", why),
+               ("Subscribers", format_number(b["subs"]), f"need {t['subs']:,}"),
+               ("Est. watch hours (12 mo)", format_number(b["hours_12m"]), f"need {t['hours']:,}"),
+               ("Income once monetized", f"{_usd(p['low'])} - {_usd(p['high'])}", f"mid {_usd(p['mid'])} / month at today's pace")])
+    if mo["status"] == "auto":
+        st.caption("Monetization status cannot be read from public data. 'Estimated' means the channel appears to meet or miss the thresholds based on the assumptions above; "
+                   "choose 'Already monetized' or 'Not monetized yet' to override.")
+
+    st.markdown(section("2. How long until it can earn? (monetization status)"), unsafe_allow_html=True)
+    if mo["earning_now"] or el["ads"]:
+        st.success("Treated as already monetized (your choice)." if mo["status"] == "monetized" else "By this estimate the channel already meets the ads-tier thresholds.")
+    else:
+        miss = []
+        if gaps["subs_gap"]:
+            miss.append(f"**{gaps['subs_gap']:,.0f}** more subscribers")
+        miss.append(f"either **{gaps['hours_gap']:,.0f}** more public long-form watch hours **or** **{gaps['shorts_gap'] / 1e6:,.1f}M** more Shorts views (90 days)")
+        st.info("To reach the ads tier you still need " + " and ".join(miss) + f". Rule used today: {t['subs']:,} subs + {t['hours']:,} hours or {t['shorts'] / 1e6:.0f}M Shorts views.")
+    if mon.ads_threshold(pd.Timestamp.now(tz="UTC")) is mon.ADS_BEFORE:
+        st.caption(f"Heads-up: from 2027-02-01 new applicants need {mon.ADS_AFTER['hours']:,} watch hours or {mon.ADS_AFTER['shorts'] / 1e6:.0f}M Shorts views. The timeline applies the rule in force in each month.")
+    el_tbl = mo["eligibility"].copy()
+    el_tbl.columns = [c.replace("_", " ").capitalize() for c in el_tbl.columns]
+    st.dataframe(el_tbl, hide_index=True, width="stretch")
+    st.caption("'In months' counts from today; first income allows about a month for YouTube's review. 'None' means not reached within 24 months.")
+
+    proj = mo["projection"]
+    fig = px.line(proj, x="date", y="subscribers", color="scenario", color_discrete_sequence=[PALETTE["slate"], PALETTE["teal"], PALETTE["violet"]])
+    fig.add_hline(y=t["subs"], line_dash="dash", line_color=PALETTE["navy"], annotation_text=f"{t['subs']:,} subscribers")
+    st.plotly_chart(style(fig, "Estimated subscribers by scenario"), width="stretch")
+    fig = px.line(proj, x="date", y="watch_hours_12m", color="scenario", color_discrete_sequence=[PALETTE["slate"], PALETTE["teal"], PALETTE["violet"]])
+    fig.add_hline(y=mon.ADS_BEFORE["hours"], line_dash="dash", line_color=PALETTE["navy"], annotation_text=f"{mon.ADS_BEFORE['hours']:,} h (until 2027-01-31)")
+    fig.add_hline(y=mon.ADS_AFTER["hours"], line_dash="dot", line_color=PALETTE["coral"], annotation_text=f"{mon.ADS_AFTER['hours']:,} h (from 2027-02-01)")
+    st.plotly_chart(style(fig, "Estimated rolling 12-month public watch hours by scenario"), width="stretch")
+
+    st.markdown(section("3. Income roadmap"), unsafe_allow_html=True)
+    st.markdown("**Milestones** (middle scenario: you reach the roadmap's upload targets):")
+    steps = mo["steps"].copy()
+    steps.columns = [c.replace("_", " ").capitalize() for c in steps.columns]
+    st.dataframe(steps, hide_index=True, width="stretch", column_config={"Target": st.column_config.TextColumn(width="large")})
+    inc = proj.copy()
+    fig = go.Figure()
+    for i, (name, g) in enumerate(inc.groupby("scenario", sort=False)):
+        col = [PALETTE["slate"], PALETTE["teal"], PALETTE["violet"]][i % 3]
+        fig.add_trace(go.Scatter(x=g["date"], y=g["income_mid"], name=name, mode="lines", line=dict(color=col)))
+    mid = inc[inc["scenario"] == inc["scenario"].iloc[len(inc) // 2]]
+    fig.add_trace(go.Scatter(x=list(mid["date"]) + list(mid["date"])[::-1], y=list(mid["income_high"]) + list(mid["income_low"])[::-1], fill="toself",
+                             fillcolor="rgba(20,184,166,0.15)", line=dict(width=0), name="Low-high range (middle scenario)", hoverinfo="skip"))
+    fig.update_yaxes(title="USD per month")
+    st.plotly_chart(style(fig, "Estimated monthly income by scenario (mid RPM; band = low-high RPM)"), width="stretch")
+    st.markdown("**What you would need to reach the ads tier sooner:**")
+    rp = mo["reverse_plan"].copy()
+    rp.columns = [c.replace("_", " ").capitalize() for c in rp.columns]
+    st.dataframe(rp, hide_index=True, width="stretch")
+    st.caption("Needs are simple arithmetic: missing hours spread over the months, converted to long-form views at your average duration and assumed % watched, then to videos at your median views.")
+    csv_button("Download income projection (CSV)", proj, "income_projection.csv", "dl_income")
+    with st.expander("Method, assumptions and limits"):
+        for n in mo["notes"]:
+            st.markdown(f"- {n}")
+
+
 def tab_videos(r: dict) -> None:
     df = r["videos"]
     if df.empty:
@@ -530,13 +630,13 @@ def main() -> None:
     r = st.session_state.get("results")
     if r is None:
         cards([("1  Enter your channel", "Paste a link", "URL, @handle or ID"), ("2  Auto benchmark", "10+ peers", "found by topic match"),
-               ("3  Growth roadmap", "Day by day", "targets from peer KPIs"), ("4  Export", "PDF / Excel", "Word, CSV, JSON")])
+               ("3  Growth roadmap", "Day by day", "targets from peer KPIs"), ("4  Income", "Estimate + roadmap", "time to monetization"), ("5  Export", "PDF / Excel", "Word, CSV, JSON")])
         st.info("Enter your channel in the sidebar and press **Analyse my channel**. Competitors are found for you automatically.")
-        st.markdown("**What public data can't tell you:** watch time, impressions, click-through rate, retention, traffic sources and revenue are private to channel owners and are never shown or estimated here.")
+        st.markdown("**What public data can't tell you:** watch time, impressions, click-through rate, retention, traffic sources and revenue are private to channel owners. The Income tab shows clearly-labelled *estimates* only, never actual revenue.")
         return
-    names = ["Overview", "🚀 Growth Roadmap", "Video Performance", "Title Analysis", "Topics", "Competitors", "Content Gaps", "AI Content Plan", "Sources and Export"]
+    names = ["Overview", "🚀 Growth Roadmap", "💰 Income & Monetization", "Video Performance", "Title Analysis", "Topics", "Competitors", "Content Gaps", "AI Content Plan", "Sources and Export"]
     tabs = st.tabs(names)
-    for tab, fn in zip(tabs, (tab_overview, tab_roadmap, tab_videos, tab_titles, tab_topics, tab_competitors, tab_gaps, tab_plan, tab_export)):
+    for tab, fn in zip(tabs, (tab_overview, tab_roadmap, tab_income, tab_videos, tab_titles, tab_topics, tab_competitors, tab_gaps, tab_plan, tab_export)):
         with tab:
             fn(r)
 

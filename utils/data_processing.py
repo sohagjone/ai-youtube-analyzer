@@ -242,6 +242,21 @@ def build_export_tables(results: dict) -> dict[str, pd.DataFrame]:
                                                 "target_60": "Day 60 target", "target_90": "Day 90 target"})
         t["Roadmap Actions"] = rm["actions"].rename(columns=lambda c: c.replace("_", " ").title())
         t["Daily Plan"] = rm["daily_plan"].rename(columns=lambda c: c.replace("_", " ").title())
+    mo = results.get("monetization") or {}
+    if mo.get("available"):
+        b, p = mo["baseline"], mo["potential_monthly_income"]
+        el = mo["eligible_now"]
+        rows = [("Monetization status (your choice)", mo["status"]), ("Subscribers used", round(b["subs"])),
+                ("Estimated public long-form watch hours, 12 months", round(b["hours_12m"])), ("Estimated Shorts views, 90 days", round(b["shorts_90d"])),
+                ("Meets ads tier by estimate", "Yes" if el["ads"] else "No"), ("Treated as earning now", "Yes" if mo["earning_now"] else "No"),
+                ("Estimated monthly income if monetized, low (USD)", round(p["low"], 2)), ("Estimated monthly income if monetized, mid (USD)", round(p["mid"], 2)),
+                ("Estimated monthly income if monetized, high (USD)", round(p["high"], 2)),
+                ("Estimate caveat", "Estimate from public data and assumptions; real revenue is private to the owner (YouTube Studio).")]
+        t["Income Estimate"] = pd.DataFrame(rows, columns=["Metric", "Value"])
+        t["Income Roadmap"] = mo["steps"].rename(columns=lambda c: c.replace("_", " ").title())
+        t["Income Timeline"] = mo["eligibility"].rename(columns=lambda c: c.replace("_", " ").title())
+        t["Income Projection"] = mo["projection"].rename(columns=lambda c: c.replace("_", " ").title())
+        t["Income Notes"] = pd.DataFrame({"Note": mo["notes"]})
     if len(results.get("discovered_competitors", [])):
         t["Auto Competitors"] = results["discovered_competitors"].drop(columns=["channel_id"], errors="ignore").rename(columns=lambda c: c.replace("_", " ").title())
     meta = results.get("meta", {})

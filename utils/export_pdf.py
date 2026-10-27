@@ -91,6 +91,10 @@ def build_pdf(results: dict) -> bytes:
     section("1. Channel overview", "Channel Overview", note="Lifetime figures describe the whole channel; sample figures describe only the selected videos/date range.")
     section("Growth roadmap", "Growth Roadmap", "Roadmap",
             cols=["Metric", "You", "Benchmark", "Status", "Day 30 target", "Day 60 target", "Day 90 target"], note=rm_note)
+    section("Income estimate (estimate, not actual revenue)", "Income Estimate", cols=["Metric", "Value"],
+            note="Estimated from public data and editable assumptions; real income, watch hours and monetization status are private to the channel owner.")
+    section("Income roadmap", "Income Roadmap", cols=["Step", "Milestone", "Target", "Today", "Estimated Date"], max_rows=12)
+    section("Time to monetization by scenario", "Income Timeline", max_rows=6)
     section("Priority actions", "Roadmap Actions", cols=["Priority Rank", "Kpi", "Action", "How"], max_rows=10)
     section("30-day action plan", "Daily Plan", cols=["Day", "Date", "Focus", "Task", "Deliverable"], max_rows=30)
     section("2. Video performance", "Video Performance", "Views timeline",
