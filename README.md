@@ -6,6 +6,13 @@ Analyse a YouTube channel's **public** performance, compare up to five competito
 - **Automatic competitor discovery**: no competitor input. The app searches recent videos on your own topics, collects the channels behind them, drops yourself and auto-generated "- Topic" channels, and keeps the 10+ best topical and audience-size matches (heuristic, shown with a match score and reason).
 - **Growth roadmap**: channel health score (0-100), KPIs vs the discovered peers (uploads per 30 days, upload steadiness, views per day, views per 1,000 subscribers, engagement, breakout rate), planning targets for day 30/60/90, priority actions, a tick-off **day-by-day 30-day plan**, 90-day milestones and a what-if calculator. Targets are planning goals, not predictions.
 - **Income & Monetization tab (estimates)**: paste a channel link and see (1) estimated income now, (2) how long until it can join the YouTube Partner Program (subscribers + public watch hours or Shorts views, using the rule in force each month, including the 2027-02-01 increase to 8,000 hours / 20M Shorts views), and (3) an income roadmap: milestones, 24-month projection for three scenarios, and what you need per month to qualify in 6 or 12 months. Assumptions (niche income per 1,000 views, % of video watched, growth, your real subscriber count, monetization status) are editable.
+- **Trending & Outliers tab**: YouTube's official most-popular chart, high-potential videos for your niche keywords, specific creators' outliers (views vs that creator's usual), and CSV import to score videos from any other platform. No scraping: other platforms have no public trending API and forbid scraping in their terms.
+- **Upload Studio tab** (for a new video; optional file upload is measured with ffmpeg and not stored):
+  1. *Editing & music*: pacing, hook, length, loudness, peaks, dead air, frame size, plus a music mood/tempo/mix plan matched to your best-performing content style and an A/B test. Never suggests copyrighted songs.
+  2. *Title, caption & hashtags*: candidates scored by how your own title patterns/lengths performed (a sorting aid, not a prediction); optional AI wording.
+  3. *Shorts predictor*: typical settled-views range from your own Shorts, with a leave-one-out backtest; if features do not beat the plain median it says so.
+  4. *Upload planner*: best past publish weekday/hour blocks (time-zone aware) and a dated schedule with typical-views ranges.
+  5. *Copyright & reuse risk*: declared-source scoring, wording scan, file-metadata check and repetition check against your own channel. It cannot see Content ID; YouTube Studio's own check is the only one that does.
 - **Channel overview**: lifetime public statistics, kept separate from statistics of the selected video sample/date range.
 - **Video performance**, **title and thumbnail analysis**, **topics** (editable), **content gaps** (transparent priority score), **AI content plan** (7/30-day calendar).
 - **Exports**: PDF, Excel (filters, number formats, links), CSV, JSON, Word - all include the roadmap.
@@ -69,3 +76,9 @@ Default quota is 10,000 units/day. One analysis costs roughly 400 units for comp
 - Content-gap scores and roadmap targets use peer performance, not search volume, and are not forecasts.
 - Thumbnail analysis is simple image statistics; text density is not measured.
 - AI outputs are recommendations, not guaranteed improvements.
+
+
+## Upload Studio notes
+- "Audience behaviour" means public proxies (views, likes, comments, titles, publish times). Retention, watch time, demographics and online hours are private to the owner (YouTube Studio).
+- ffmpeg is required for file measurements (`packages.txt` installs it on Streamlit Community Cloud; locally install ffmpeg). Without it the studio still works from manual inputs. Large uploads are limited by `.streamlit/config.toml` (`maxUploadSize`, 500 MB).
+- Trending and niche search cost YouTube quota (search = 100 units per keyword); results are cached in the session.

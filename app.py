@@ -12,7 +12,15 @@ import streamlit as st
 
 from src import content_gap_analysis as gaps_a
 from src import content_strategy as strat
+from src import audience_profile as ap
+from src import copyright_risk as crisk
+from src import editing_advice as ea
+from src import media_analysis as ma
+from src import metadata_generator as mg
 from src import monetization as mon
+from src import shorts_predictor as sp
+from src import trending as tr
+from src import upload_planner as up
 from src import roadmap as rm
 from src import title_analysis as ta
 from src.ai_provider import AIProvider, AIProviderError
@@ -22,7 +30,7 @@ from src.sample_data import SampleClient
 from src.topic_analysis import parse_topic_mapping
 from src.youtube_api import (InvalidAPIKeyError, MissingAPIKeyError, QuotaExceededError, YouTubeAPIError,
                              YouTubeClient, estimate_quota)
-from utils.data_processing import df_to_csv_bytes, format_number, results_to_json_bytes
+from utils.data_processing import df_to_csv_bytes, format_number, results_to_json_bytes, top_terms
 from utils.export_excel import build_workbook
 from utils.export_pdf import build_pdf
 from utils.export_word import build_docx
@@ -382,6 +390,229 @@ def tab_income(r: dict) -> None:
             st.markdown(f"- {n}")
 
 
+def get_client():
+    return SampleClient() if data_mode() == "sample" else YouTubeClient(youtube_key())
+
+
+CATEGORIES = {"All categories": None, "Gaming": "20", "Education": "27", "How-to & Style": "26", "Entertainment": "24", "Science & Technology": "28",
+              "People & Blogs": "22", "Music": "10", "Sports": "17", "Comedy": "23", "News & Politics": "25", "Travel & Events": "19"}
+
+
+def tab_trending(r: dict) -> None:
+    st.markdown(section("Trending and high-potential videos"), unsafe_allow_html=True)
+    st.info("**Sources:** YouTube's official API only. TikTok, Instagram, X and other platforms have no public trending API and forbid scraping, so this app does not scrape them. "
+            "For those platforms, import a CSV from your own analytics export or a tool you are licensed to use. "
+            "Study topics, formats and hooks; do not copy titles, thumbnails or footage (that creates copyright and reused-content risk).")
+    subs = r["channel"].get("subscribers") or None
+    mode = st.radio("What do you want to find?", ["Trending now (YouTube chart)", "High-potential in my niche", "Specific creators", "Other platforms (CSV import)"], horizontal=True)
+    kw_default = ", ".join(k for k, _ in top_terms(r["videos"]["title"], 3))
+    res, notes = None, []
+    try:
+        if mode.startswith("Trending"):
+            c1, c2 = st.columns(2)
+            region = c1.text_input("Region code", "US", max_chars=2, help="Two-letter country code, e.g. US, GB, BD, IN")
+            cat = c2.selectbox("Category", list(CATEGORIES))
+            st.caption("About 3 quota units.")
+            if st.button("Find trending videos", type="primary"):
+                with st.spinner("Asking YouTube..."):
+                    res = tr.trending(get_client(), region or "US", CATEGORIES[cat], subs)
+        elif mode.startswith("High-potential"):
+            kws = st.text_input("Your niche keywords (up to 3, comma separated)", kw_default)
+            c1, c2, c3 = st.columns(3)
+            days = c1.slider("Published in the last (days)", 7, 90, 30)
+            region = c2.text_input("Region code (optional)", "", max_chars=2)
+            short_only = c3.checkbox("Short videos only")
+            st.caption("About 100 quota units per keyword. Results from creators near your size are flagged because they are the most realistic to learn from.")
+            if st.button("Find high-potential videos", type="primary"):
+                with st.spinner("Searching YouTube..."):
+                    res = tr.niche_outliers(get_client(), [k.strip() for k in kws.split(",")], days, region or None, subs, short_only)
+        elif mode.startswith("Specific"):
+            links = st.text_area("Creator channel links, @handles or IDs (one per line, up to 8)", height=110)
+            st.caption("About 3-4 quota units per creator. 'Outlier' means views far above that creator's own typical video.")
+            if st.button("Analyse these creators", type="primary") and links.strip():
+                with st.spinner("Reading public uploads..."):
+                    res, notes = tr.creator_outliers(get_client(), links.splitlines())
+        else:
+            st.download_button("Download CSV template", tr.TEMPLATE_CSV, "other_platforms_template.csv", "text/csv")
+            up_file = st.file_uploader("Your CSV (columns: title, views, posted_at; optional platform, creator, url, likes, comments, followers)", type=["csv"])
+            if up_file is not None:
+                try:
+                    res, notes = tr.import_external(pd.read_csv(up_file), subs)
+                except Exception as exc:  # noqa: BLE001
+                    notes = [f"The CSV could not be read: {exc}"]
+    except (QuotaExceededError, YouTubeAPIError, MissingAPIKeyError, InvalidAPIKeyError) as exc:
+        st.error(str(exc))
+    if res is not None:
+        st.session_state["trend_result"] = res
+    for n in notes:
+        st.warning(n)
+    res = st.session_state.get("trend_result")
+    if res is not None and len(res):
+        cards([("Videos scored", f"{len(res):,}", "ranked by potential score"), ("Top score", f"{res['potential_score'].max():.0f}", "0-100, relative to this list"),
+               ("Breakouts", f"{res['signal'].str.startswith(('Breakout', 'Outlier')).sum():,}", "far above audience size")])
+        cols = [c for c in res.columns if c not in ("video_id",)]
+        show_df(res[cols].round(3))
+        csv_button("Download results (CSV)", res, "trending_videos.csv", "stu_dl_trend")
+        st.caption("Potential score = 40% views per day + 40% views relative to audience size (capped) + 20% engagement, ranked within this list. It highlights what to study; it does not predict your results.")
+    elif res is not None:
+        st.info("Nothing found. Try other keywords, a wider date range or another region.")
+
+
+def _studio_inputs(r: dict) -> dict:
+    st.markdown(section("Your new video"), unsafe_allow_html=True)
+    st.caption("Fill this once; every feature below uses it together with your channel's public results. Uploading the file lets the app measure loudness, pacing and size "
+               "(analysed on the server, not stored). Nothing here is shared.")
+    c1, c2 = st.columns(2)
+    title = c1.text_input("Draft title (optional)", key="st_title")
+    topic = c2.text_input("Topic / main keyword", key="st_topic", placeholder="e.g. home espresso")
+    c3, c4 = st.columns(2)
+    keywords = c3.text_input("Extra keywords (comma separated)", key="st_kw")
+    points = c4.text_area("Key points of the video (one per line)", key="st_points", height=80)
+    f = st.file_uploader("Optional: upload the video/audio file for measurements", type=[e.strip(".") for e in sorted(ma.ALLOWED_EXT)], key="st_file")
+    if f is not None and st.button("Measure my file"):
+        with st.spinner("Measuring audio, pacing and size (up to a few minutes for long files)..."):
+            st.session_state["st_media"] = ma.analyze_upload(f.getvalue(), f.name)
+    media = st.session_state.get("st_media")
+    if media:
+        if media.get("available"):
+            st.success(f"Measured: {media['duration_seconds']:.0f}s, {media['width']}x{media['height']}"
+                       + (f", {media['loudness_lufs']:.1f} LUFS" if media.get("loudness_lufs") is not None else "")
+                       + (f", {media['cuts_per_minute']} cuts/min" if media.get("cuts_per_minute") is not None else ""))
+        for n in media.get("notes", []):
+            st.warning(n)
+    guess_dur = float(media["duration_seconds"]) if media and media.get("available") else 30.0
+    guess_short = bool(media and media.get("available") and media["duration_seconds"] <= 180 and media.get("vertical"))
+    c5, c6 = st.columns(2)
+    fmt = c5.radio("Format", ["short", "long"], index=0 if guess_short else 1, horizontal=True, format_func=lambda x: "YouTube Short" if x == "short" else "Long-form video", key="st_fmt")
+    dur = c6.number_input("Duration (seconds)", 5, 14400, int(guess_dur), key=f"st_dur_{int(guess_dur)}")
+    return {"title": title.strip(), "topic": topic.strip(), "keywords": [k.strip() for k in keywords.split(",") if k.strip()],
+            "points": [p.strip() for p in points.splitlines() if p.strip()], "fmt": fmt, "duration": float(dur), "media": media if media and media.get("available") else None}
+
+
+def tab_studio(r: dict) -> None:
+    prof = r.get("audience_profile") or ap.build_profile(r["videos"])
+    if not prof.get("available"):
+        st.info("Analyse a channel with at least a few videos to use the studio.")
+        return
+    v = _studio_inputs(r)
+    st.caption(f"Channel profile: {prof['n_videos']} videos ({prof['n_short']} Shorts), reliability **{prof['reliability']}**. " + prof["note"])
+    t1, t2, t3, t4, t5 = st.tabs(["🎞️ Editing & music", "✍️ Title, caption & hashtags", "📈 Shorts predictor", "🗓️ Upload planner", "🛡️ Copyright & reuse risk"])
+    with t1:
+        inferred, why = ea.infer_mood(r["videos"])
+        mood = st.selectbox("Music / editing style", list(ea.MOODS), index=list(ea.MOODS).index(inferred))
+        st.caption(f"Suggested: **{inferred}**. {why} Change it if you disagree.")
+        has_voice = st.checkbox("The video has talking / voice-over", value=True)
+        adv = ea.build_advice(v["fmt"], v["duration"], mood, prof, v["media"])
+        show_df(adv)
+        mp = ea.music_plan(v["fmt"], mood, has_voice)
+        cards([("Music mood", mp["mood"], mp["genre"][:60]), ("Tempo", f"{mp['bpm'][0]}-{mp['bpm'][1]} BPM", f"cut about every {mp['cut_every_seconds']}s on the beat"),
+               ("Level", "Under the voice", "12-18 dB below speech")])
+        st.markdown(f"**Mix:** {mp['mix']}\n\n**Structure:** {mp['structure']}")
+        st.markdown("**Where to get music you can use:**\n" + "\n".join(f"- {s}" for s in mp["sources"]))
+        st.info("**Test it:** " + mp["ab_test"])
+        st.caption("Public data cannot show which music a viewer prefers, so this is a standard production plan matched to your best-performing content style, not a measured preference.")
+        csv_button("Download editing advice (CSV)", adv, "editing_advice.csv", "stu_dl_edit")
+    with t2:
+        c1, c2 = st.columns(2)
+        goal = c1.selectbox("Main goal", list(strat.CTAS))
+        audience = c2.text_input("Who is it for?", key="st_aud")
+        other = st.text_input("Compare with (optional, for 'X vs Y' titles)", key="st_other")
+        prov = ai_provider()
+        use_ai = st.checkbox("Also ask the AI assistant for title ideas", disabled=prov is None, help=None if prov else "AI assistant is not configured")
+        if st.button("Generate titles, caption and hashtags", type="primary"):
+            try:
+                st.session_state["st_meta"] = mg.generate(prof, v["topic"] or v["title"], v["keywords"], v["points"], v["fmt"], v["duration"], goal, audience, other, prov if use_ai else None)
+            except ValueError as exc:
+                st.warning(str(exc))
+        m = st.session_state.get("st_meta")
+        if m:
+            show_df(m["titles"])
+            st.markdown("**Caption / description**")
+            st.code(m["description"], language=None)
+            c3, c4 = st.columns(2)
+            c3.markdown("**Hashtags**")
+            c3.code(" ".join(m["hashtags"]), language=None)
+            c4.markdown("**Tags (optional)**")
+            c4.code(", ".join(m["tags"]), language=None)
+            st.markdown("**Pinned comment idea**")
+            st.code(m["pinned_comment"], language=None)
+            st.caption(m["note"])
+            csv_button("Download title options (CSV)", m["titles"], "title_options.csv", "stu_dl_titles")
+    with t3:
+        if v["fmt"] != "short":
+            st.info("Switch the format above to **YouTube Short** to predict a Short.")
+        topics = ["(none)"] + (list(r["topics"]["topic"]) if len(r["topics"]) else [])
+        c1, c2 = st.columns(2)
+        pdate = c1.date_input("Planned publish date", value=date.today() + timedelta(days=1), key="st_pdate")
+        ptopic = c2.selectbox("Closest topic on your channel", topics)
+        if st.button("Predict Short performance", type="primary"):
+            if not (v["title"] or v["topic"]):
+                st.warning("Enter a draft title or topic above first.")
+            else:
+                row = sp.feature_row(v["title"] or v["topic"], v["duration"], pd.Timestamp(pdate, tz="UTC"), "", "" if ptopic == "(none)" else ptopic)
+                st.session_state["st_pred"] = sp.predict(r["videos"], row)
+        pr = st.session_state.get("st_pred")
+        if pr:
+            if not pr["available"]:
+                st.warning(pr["message"])
+            else:
+                cards([("Typical settled views", f"{format_number(pr['range_low'])} - {format_number(pr['range_high'])}", f"median {format_number(pr['expected_median'])}"),
+                       ("Chance above your Shorts median", f"{pr['chance_above_channel_median'] * 100:.0f}%", f"your median {format_number(pr['baseline_median'])}"),
+                       ("Confidence", pr["confidence"], f"{pr['n']} of your Shorts")])
+                (st.success if pr["features_beat_baseline"] else st.info)(pr["message"])
+                if pr["drivers"]:
+                    show_df(pd.DataFrame(pr["drivers"]))
+                for c in pr["caveats"]:
+                    st.caption("• " + c)
+    with t4:
+        c1, c2, c3 = st.columns(3)
+        tz = c1.number_input("Your time zone (UTC offset, hours)", -12.0, 14.0, 0.0, 0.5, help="Bangladesh = 6")
+        horizon = c2.radio("Plan length", [7, 14, 30], index=1, horizontal=True, format_func=lambda d: f"{d} days")
+        ppw = c3.slider("Posts per week", 1, 7, 3, key="pl_ppw")
+        formats = st.multiselect("Formats", strat.FORMATS, default=["YouTube Short", "Long-form video"], key="pl_fmt")
+        niche = st.text_input("Niche (optional)", key="pl_niche")
+        slots = up.slot_table(r["videos"], tz)
+        if slots["available"]:
+            piv = slots["slots"].pivot(index="weekday", columns="hour_block", values="score").reindex(up.DAYS)
+            fig = px.imshow(piv, color_continuous_scale="Teal", aspect="auto", labels=dict(color="Slot score"))
+            st.plotly_chart(style(fig, f"Your past publish slots (1.0 = typical; reliability: {slots['reliability']}; time zone UTC{tz:+g})"), width="stretch")
+            top = slots["slots"].head(3)
+            st.caption("Best past slots: " + "; ".join(f"{x.weekday} {x.hour_block} ({x.evidence} evidence)" for x in top.itertuples()) +
+                       ". These are when your better videos were published, not when viewers are online: confirm in YouTube Studio > Analytics > Audience.")
+        if st.button("Build upload plan", type="primary"):
+            st.session_state["st_plan"] = up.build_plan(r["videos"], r["gaps"], r["topics"], days=horizon, posts_per_week=ppw, formats=formats or None, niche=niche, tz_offset_hours=tz)
+        plan = st.session_state.get("st_plan")
+        if plan is not None and len(plan):
+            show_df(plan)
+            csv_button("Download upload plan (CSV)", plan, "upload_plan.csv", "stu_dl_plan")
+            st.caption("'Typical views' = the 25th-75th percentile of your own settled videos in that format, scaled by the slot score. Topics come from your content gaps and are evidence-labelled.")
+        with st.expander("After-upload checklist"):
+            for c in up.CHECKLIST:
+                st.markdown(f"- {c}")
+    with t5:
+        c1, c2 = st.columns(2)
+        music = c1.selectbox("Music", list(crisk.MUSIC), index=len(crisk.MUSIC) - 1)
+        clips = c2.selectbox("Other people's video clips", list(crisk.CLIPS))
+        c3, c4 = st.columns(2)
+        images = c3.selectbox("Images / graphics", list(crisk.IMAGES))
+        voice = c4.selectbox("Voice and script", list(crisk.VOICE))
+        c5, c6, c7 = st.columns(3)
+        perm = c5.checkbox("I have written permission/licence for third-party footage")
+        commentary = c6.checkbox("I add substantial original commentary or transformation", value=True)
+        ai_real = c7.checkbox("Contains realistic AI-generated/altered content")
+        ai_disc = st.checkbox("...and I disclose it in the upload settings", disabled=not ai_real)
+        desc = st.text_area("Draft description (optional, for the wording scan)", key="cr_desc", height=80)
+        if st.button("Check risk", type="primary"):
+            st.session_state["st_risk"] = crisk.assess(v["title"] or v["topic"], desc, v["keywords"], music, clips, images, voice, perm, commentary, ai_real, ai_disc,
+                                                       r["videos"], v["media"], v["duration"])
+        rk = st.session_state.get("st_risk")
+        if rk:
+            (st.error if rk["level"] == "High" else st.warning if rk["level"] == "Medium" else st.success)(f"**{rk['level']} risk** (score {rk['score']}/100). {rk['summary']}")
+            show_df(rk["findings"])
+            st.caption(rk["disclaimer"])
+            csv_button("Download risk findings (CSV)", rk["findings"], "risk_findings.csv", "stu_dl_risk")
+
+
 def tab_videos(r: dict) -> None:
     df = r["videos"]
     if df.empty:
@@ -630,13 +861,13 @@ def main() -> None:
     r = st.session_state.get("results")
     if r is None:
         cards([("1  Enter your channel", "Paste a link", "URL, @handle or ID"), ("2  Auto benchmark", "10+ peers", "found by topic match"),
-               ("3  Growth roadmap", "Day by day", "targets from peer KPIs"), ("4  Income", "Estimate + roadmap", "time to monetization"), ("5  Export", "PDF / Excel", "Word, CSV, JSON")])
+               ("3  Growth roadmap", "Day by day", "targets from peer KPIs"), ("4  Income", "Estimate + roadmap", "time to monetization"), ("5  Upload Studio", "Edit, titles, plan", "music, Shorts, copyright"), ("6  Export", "PDF / Excel", "Word, CSV, JSON")])
         st.info("Enter your channel in the sidebar and press **Analyse my channel**. Competitors are found for you automatically.")
         st.markdown("**What public data can't tell you:** watch time, impressions, click-through rate, retention, traffic sources and revenue are private to channel owners. The Income tab shows clearly-labelled *estimates* only, never actual revenue.")
         return
-    names = ["Overview", "🚀 Growth Roadmap", "💰 Income & Monetization", "Video Performance", "Title Analysis", "Topics", "Competitors", "Content Gaps", "AI Content Plan", "Sources and Export"]
+    names = ["Overview", "🚀 Growth Roadmap", "💰 Income & Monetization", "🔥 Trending & Outliers", "🎬 Upload Studio", "Video Performance", "Title Analysis", "Topics", "Competitors", "Content Gaps", "AI Content Plan", "Sources and Export"]
     tabs = st.tabs(names)
-    for tab, fn in zip(tabs, (tab_overview, tab_roadmap, tab_income, tab_videos, tab_titles, tab_topics, tab_competitors, tab_gaps, tab_plan, tab_export)):
+    for tab, fn in zip(tabs, (tab_overview, tab_roadmap, tab_income, tab_trending, tab_studio, tab_videos, tab_titles, tab_topics, tab_competitors, tab_gaps, tab_plan, tab_export)):
         with tab:
             fn(r)
 
