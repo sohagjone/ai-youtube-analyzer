@@ -1,100 +1,120 @@
-"""Upload planner: best publish slots from the channel's own history, then a dated schedule.
+"""Upload planner: best publishing slots and a short upload schedule from your channel's own history.
 
-Slot scores come from public views of this channel's own videos grouped by weekday and by 4-hour block (shrunk toward 'no effect' when
-a group is small). They show when past videos that did well were PUBLISHED, which is not the same as when the audience is online:
-check YouTube Studio > Analytics > Audience ('When your viewers are on YouTube') and treat that as the final word.
+Slot effect = median (views / your median) of mature videos published in that weekday + 3-hour block (in your time zone),
+shrunk toward a prior so thin slots cannot dominate. The prior is 'no effect', nudged half-way toward what your discovered
+peers show for the same slot (their audiences differ, so it counts only half). It is an observed pattern - not a guarantee
+that publishing then will raise views; with small samples treat it as a test.
 """
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
 
-from src.audience_profile import HOUR_BLOCKS, LONG_FMT, SHORT_FMT, build_profile, hour_block_label
-from src.content_strategy import generate_calendar
-
-DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
-CHECKLIST = [
-    "Before publishing: title, thumbnail (long-form) and first 2 seconds agree on the same promise.",
-    "Run YouTube Studio's copyright and ad-suitability checks during upload.",
-    "First hour: pin a comment with a question and answer early replies.",
-    "First 24 hours: share to one place your audience actually uses (community post, newsletter), without spamming.",
-    "After 48 hours: note views, likes per view and, in Studio, average view duration; log them next to this plan.",
-]
+WEEKDAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+SHRINK_K = 3.0
+OWN_BONUS = 0.3
+PEER_K = 10.0
+MIN_AGE_DAYS = 14
+COMMON_TZ = ["UTC", "Asia/Dhaka", "Asia/Kolkata", "Asia/Dubai", "Asia/Singapore", "Asia/Tokyo", "Europe/London", "Europe/Paris",
+             "Europe/Istanbul", "Africa/Lagos", "America/New_York", "America/Chicago", "America/Los_Angeles", "America/Sao_Paulo", "Australia/Sydney"]
 
 
-def slot_table(df: pd.DataFrame, tz_offset_hours: float = 0.0) -> dict:
-    prof = build_profile(df, tz_offset_hours)
-    if not prof.get("available"):
-        return {"available": False}
-    wd = prof["effects"].get("weekday", pd.DataFrame()).rename(columns={"group": "weekday"})
-    hb = prof["effects"].get("hour_block", pd.DataFrame()).rename(columns={"group": "hour_block"})
-    if wd.empty or hb.empty:
-        return {"available": False}
-    wmap, hmap = dict(zip(wd["weekday"], wd["effect"])), dict(zip(hb["hour_block"], hb["effect"]))
-    wn, hn = dict(zip(wd["weekday"], wd["videos"])), dict(zip(hb["hour_block"], hb["videos"]))
-    rows = []
-    for d in DAYS:
-        for a, b in HOUR_BLOCKS:
-            lbl = hour_block_label(a)
-            rows.append({"weekday": d, "hour_block": lbl, "score": wmap.get(d, 1.0) * hmap.get(lbl, 1.0), "weekday_videos": wn.get(d, 0), "block_videos": hn.get(lbl, 0)})
-    slots = pd.DataFrame(rows)
-    slots["evidence"] = np.where((slots["weekday_videos"] >= 4) & (slots["block_videos"] >= 6), "ok", "thin")
-    return {"available": True, "slots": slots.sort_values("score", ascending=False).reset_index(drop=True), "weekday": wd, "hour_block": hb,
-            "reliability": prof["reliability"], "tz_offset_hours": tz_offset_hours, "n": prof["n_videos"]}
+def tz_of(name: str) -> ZoneInfo:
+    try:
+        return ZoneInfo(name)
+    except Exception:  # noqa: BLE001 - unknown name or missing tz database
+        return ZoneInfo("UTC")
 
 
-def format_ranges(df: pd.DataFrame) -> dict:
-    """Typical settled views per format (25th/50th/75th percentile of videos at least 14 days old)."""
-    out = {}
-    for key, name in (("short", SHORT_FMT), ("long", LONG_FMT)):
-        s = df[(df["format"] == name) & (df["age_days"] >= 14)]["views"]
-        out[key] = (float(s.quantile(0.25)), float(s.median()), float(s.quantile(0.75))) if len(s) >= 3 else None
-    return out
+def _block_label(h: int) -> str:
+    return f"{h:02d}:00-{(h + 3) % 24:02d}:00"
 
 
-def build_plan(df: pd.DataFrame, gaps, topics, start: date | None = None, days: int = 14, posts_per_week: int = 3, formats: list[str] | None = None,
-               niche: str = "", audience: str = "", tz_offset_hours: float = 0.0, minimum_gap_days: int = 1) -> pd.DataFrame:
-    """Schedule ideas onto the best weekdays/hours. Uses the existing evidence-labelled idea pool and assigns each a slot + expected range."""
-    start = start or date.today()
-    st = slot_table(df, tz_offset_hours)
-    cal = generate_calendar(gaps, topics, days=days, posts_per_week=posts_per_week, formats=formats, niche=niche, audience=audience, start=start)
-    if cal.empty:
-        return cal
-    ranges = format_ranges(df)
-    if st["available"]:
-        best_per_day = st["slots"].groupby("weekday").head(1).set_index("weekday")
-        order = [d for d in st["slots"]["weekday"].drop_duplicates()]
+def _rel_by_slot(df: pd.DataFrame, tz: str) -> pd.DataFrame:
+    d = df[df["age_days"] >= MIN_AGE_DAYS]
+    if len(d) < 3:
+        return pd.DataFrame(columns=["weekday", "block", "n", "rel"])
+    local = d["published_at"].dt.tz_convert(tz_of(tz))
+    med = float(d["views"].median())
+    x = pd.DataFrame({"weekday": local.dt.dayofweek, "block": (local.dt.hour // 3) * 3, "rel": d["views"] / med if med > 0 else 1.0})
+    return x.groupby(["weekday", "block"])["rel"].agg(n="count", rel="median").reset_index()
+
+
+def slot_table(df: pd.DataFrame, tz: str = "UTC", peers: dict[str, pd.DataFrame] | None = None) -> pd.DataFrame:
+    own = _rel_by_slot(df, tz)
+    peer_frames = [_rel_by_slot(p, tz) for p in (peers or {}).values()]
+    peer_frames = [p for p in peer_frames if len(p)]
+    if peer_frames:
+        pooled = pd.concat(peer_frames).groupby(["weekday", "block"]).apply(
+            lambda g: pd.Series({"peer_n": g["n"].sum(), "peer_rel": float(np.average(g["rel"], weights=g["n"]))}), include_groups=False).reset_index()
     else:
-        best_per_day, order = None, DAYS
-    window = [start + timedelta(days=i) for i in range(days)]
-    free = {d: True for d in window}
-    used: list[date] = []
+        pooled = pd.DataFrame(columns=["weekday", "block", "peer_n", "peer_rel"])
+    grid = pd.MultiIndex.from_product([range(7), range(0, 24, 3)], names=["weekday", "block"]).to_frame(index=False)
+    t = grid.merge(own, how="left", on=["weekday", "block"]).merge(pooled, how="left", on=["weekday", "block"])
+    t["n"] = t["n"].fillna(0).astype(int)
+    t["peer_n"] = t["peer_n"].fillna(0).astype(int)
+    peer_shrunk = (t["peer_n"] * t["peer_rel"].fillna(1.0) + PEER_K * 1.0) / (t["peer_n"] + PEER_K)  # peers' thin slots are noisy too
+    prior = np.where(t["peer_n"] >= 5, 0.5 * (1 + peer_shrunk), 1.0)
+    own_rel = t["rel"].fillna(1.0)
+    t["score"] = (t["n"] * own_rel + SHRINK_K * prior) / (t["n"] + SHRINK_K)
+    t["day"] = t["weekday"].map(dict(enumerate(WEEKDAYS)))
+    t["window"] = t["block"].apply(_block_label)
+    t["evidence"] = np.where(t["n"] >= 2, "own history", np.where(t["peer_n"] >= 5, "peers only", "none"))
+    t["priority"] = t["score"] + np.where(t["evidence"] == "own history", OWN_BONUS, 0.0)  # slots backed by your own videos are preferred
+    return t[["weekday", "day", "block", "window", "n", "rel", "peer_n", "peer_rel", "score", "evidence", "priority"]].rename(
+        columns={"n": "own_videos", "rel": "own_median_rel"})
+
+
+def reliability(df: pd.DataFrame) -> tuple[str, str]:
+    n = int((df["age_days"] >= MIN_AGE_DAYS).sum())
+    if n >= 30:
+        return "Moderate", f"{n} mature videos - patterns are indicative, still not proof."
+    if n >= 15:
+        return "Low-moderate", f"{n} mature videos - use as a test, not a rule."
+    return "Low", f"Only {n} mature videos - treat every slot as an experiment."
+
+
+def recommend(slots: pd.DataFrame, n: int = 3) -> dict:
+    ok = slots[slots["evidence"] != "none"].sort_values("priority", ascending=False)
+    avoid = slots[slots["own_videos"] >= 3].sort_values("score").head(2)
+    return {"best": ok.head(n).reset_index(drop=True), "avoid": avoid[avoid["score"] < 0.9].reset_index(drop=True)}
+
+
+def plan_uploads(slots: pd.DataFrame, uploads_per_30_days: float, ideas: list[tuple[str, str]], now_local: datetime,
+                 horizon_days: int = 14, lead_hours: int = 12) -> pd.DataFrame:
+    """Schedule uploads over the horizon on the best-scoring weekday slots, at most one per day."""
+    per_week = float(np.clip(uploads_per_30_days / 30 * 7, 1, 7))
+    count = int(np.clip(round(per_week * horizon_days / 7), 1, horizon_days))
+    usable = slots[slots["evidence"] != "none"]
+    if usable.empty:
+        usable = slots
+    best_by_day = usable.sort_values("priority", ascending=False).drop_duplicates("weekday").set_index("weekday")
+    earliest = now_local + timedelta(hours=lead_hours)
+    days = []
+    for i in range(horizon_days + 1):
+        d = (now_local + timedelta(days=i)).replace(minute=0, second=0, microsecond=0)
+        wd = d.weekday()
+        if wd not in best_by_day.index:
+            continue
+        row = best_by_day.loc[wd]
+        when = d.replace(hour=int(row["block"]))
+        if when < earliest:
+            continue
+        days.append((when, float(row["priority"]), int(row["own_videos"]), row["evidence"], float(row["score"])))
+    chosen: list[tuple] = []
+    for item in sorted(days, key=lambda x: -x[1]):
+        if len(chosen) >= count:
+            break
+        if all(abs((item[0] - c[0]).total_seconds()) >= 20 * 3600 for c in chosen):
+            chosen.append(item)
+    chosen.sort(key=lambda x: x[0])
     rows = []
-    for item in cal.itertuples():
-        # choose the highest-scoring weekday with an open date at least `minimum_gap_days` from earlier posts
-        pick = None
-        for wd in order:
-            for d in window:
-                if free[d] and d.strftime("%A") == wd and all(abs((d - u).days) >= minimum_gap_days for u in used):
-                    pick = d
-                    break
-            if pick:
-                break
-        if pick is None:
-            pick = next((d for d in window if free[d]), start)
-        free[pick] = False
-        used.append(pick)
-        short = item.format == "YouTube Short"
-        rng = ranges["short" if short else "long"]
-        slot = best_per_day.loc[pick.strftime("%A")] if best_per_day is not None else None
-        score = float(slot["score"]) if slot is not None else 1.0
-        rows.append({"date": pick.isoformat(), "weekday": pick.strftime("%A"), "best_time_block": slot["hour_block"] if slot is not None else "Check YouTube Studio audience hours",
-                     "slot_score": round(score, 2), "slot_evidence": slot["evidence"] if slot is not None else "none", "format": item.format, "topic": item.topic,
-                     "working_title": item.working_title, "opening_hook": item.opening_hook, "basis": item.basis,
-                     "typical_views_low": round(rng[0] * score) if rng else None, "typical_views_mid": round(rng[1] * score) if rng else None,
-                     "typical_views_high": round(rng[2] * score) if rng else None})
-    plan = pd.DataFrame(rows).sort_values("date").reset_index(drop=True)
-    plan["time_zone"] = f"UTC{tz_offset_hours:+g}"
-    return plan
+    for k, (when, _prio, n, ev, score) in enumerate(chosen):
+        title, fmt = ideas[k % len(ideas)] if ideas else ("[idea]", "Long-form")
+        rows.append({"publish_at_local": when.strftime("%Y-%m-%d %H:%M"), "day": WEEKDAYS[when.weekday()], "idea": title, "format": fmt,
+                     "slot_score": round(score, 2), "own_videos_in_slot": n, "evidence": ev,
+                     "note": "Observed slot effect; not a guarantee." if ev == "own history" else "Little or no data for this slot - treat as a test."})
+    return pd.DataFrame(rows)

@@ -34,13 +34,18 @@ CSS = """
 .sec {border-left: 6px solid #6C5CE7; padding: 4px 0 4px 12px; margin: 22px 0 10px 0; font-size: 1.25rem; font-weight: 800; color:#2D3436;}
 .card {background:#fff; border:1px solid #E6E8FF; border-left: 6px solid var(--c,#6C5CE7); border-radius: 12px; padding: 14px 16px; margin-bottom: 10px;
   box-shadow: 0 3px 10px rgba(108,92,231,.08);}
-.card h4 {margin: 0 0 4px 0; color:#2D3436;}
+.card h4 {margin: 0 0 4px 0; color:#2D3436; font-size: 1.02rem; line-height: 1.35;}
 .card .meta {color:#636E72; font-size:.86rem;}
 .badge {display:inline-block; padding: 2px 10px; border-radius: 999px; font-size: .74rem; font-weight: 700; color:#fff; margin-right: 6px;}
 .stTabs [data-baseweb="tab-list"] {gap: 6px; flex-wrap: wrap;}
 .stTabs [data-baseweb="tab"] {background:#F0F1FF; border-radius: 10px 10px 0 0; padding: 8px 14px; font-weight: 600;}
 .stTabs [aria-selected="true"] {background: linear-gradient(135deg,#6C5CE7,#0984E3); color:#fff !important;}
 .stTabs [aria-selected="true"] p {color:#fff !important;}
+.st-key-nav div[role="radiogroup"] {gap: 8px; flex-wrap: wrap;}
+.st-key-nav div[role="radiogroup"] > label {background:#F0F1FF; border:1px solid #E0E2FF; border-radius: 999px; padding: 6px 16px; margin: 0; cursor: pointer;}
+.st-key-nav div[role="radiogroup"] > label > div:first-child {display: none;}
+.st-key-nav div[role="radiogroup"] > label:has(input:checked) {background: linear-gradient(135deg,#6C5CE7,#0984E3); border-color: transparent;}
+.st-key-nav div[role="radiogroup"] > label:has(input:checked) p {color:#fff !important; font-weight: 700;}
 div[data-testid="stDownloadButton"] button {background: linear-gradient(135deg,#00B894,#0984E3); color:#fff; border:0; border-radius: 10px; font-weight: 700;}
 div[data-testid="stExpander"] {border: 1px solid #E6E8FF; border-radius: 12px; background:#FBFBFF;}
 </style>

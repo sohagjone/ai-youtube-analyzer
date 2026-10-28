@@ -7,6 +7,7 @@ import openpyxl
 import pandas as pd
 from docx import Document
 
+from tests.conftest import goto
 from src.ai_provider import AIProvider, AIProviderError, parse_json_loose
 from utils.data_processing import SECRET_PATTERNS, df_to_csv_bytes, redact_secrets, results_to_json_bytes, to_jsonable
 from utils.export_excel import build_workbook
@@ -182,7 +183,7 @@ def test_app_invalid_input_shows_friendly_error():
 
 def test_app_tabs_include_roadmap_and_no_search():
     at = _analyse(_run_app(), "@sample_own")
-    names = [t.label for t in at.tabs]
+    names = list(at.radio(key="active_tab").options)
     assert any("Growth Roadmap" in n for n in names) and "Search" not in names and not at.exception
     assert len(at.session_state["results"]["competitors"]) == 11  # you + 10 auto-discovered
 
@@ -190,6 +191,7 @@ def test_app_tabs_include_roadmap_and_no_search():
 def test_app_downloads_survive_reruns_and_new_search_replaces_results():
     at = _analyse(_run_app(), "@sample_own")
     assert not at.exception and at.session_state["results"]["channel"]["title"].endswith("Sample_Own")
+    goto(at, "Sources and Export")
     [b for b in at.button if b.label == "Build / refresh export files"][0].click()
     at.run()
     built = {k: len(v) for k, v in at.session_state["exports"].items()}
@@ -205,9 +207,12 @@ def test_app_downloads_survive_reruns_and_new_search_replaces_results():
 
 def test_app_calendar_marks_exports_stale():
     at = _analyse(_run_app(), "@sample_own")
+    goto(at, "Sources and Export")
     [b for b in at.button if b.label == "Build / refresh export files"][0].click()
     at.run()
+    goto(at, "AI Content Plan")
     [b for b in at.button if b.label == "Generate content calendar"][0].click()
     at.run()
+    goto(at, "Sources and Export")
     assert not at.exception and len(at.session_state["results"]["calendar"]) > 0
     assert any("Results changed" in w.value for w in at.warning)

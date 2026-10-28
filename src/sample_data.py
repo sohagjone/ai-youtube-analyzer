@@ -68,31 +68,6 @@ class SampleClient:
         }
         return {"channel": channel, "videos": videos, "notes": ["SAMPLE DATA - illustrative only, not real YouTube data."]}
 
-    def _sample_videos(self, label: str, n: int) -> list[dict]:
-        rng = random.Random(int(hashlib.sha256(label.encode()).hexdigest()[:8], 16))
-        topics = ["espresso", "pour over", "cold brew", "grinder", "home roasting", "latte art", "aeropress"]
-        out = []
-        for i in range(n):
-            ch = rng.randint(1, 12)
-            cid = f"UCsample{ch:02d}"
-            t = rng.choice(topics)
-            vid = hashlib.sha256(f"{label}{i}".encode()).hexdigest()[:11]
-            short = rng.random() < 0.4
-            out.append({"video_id": vid, "title": rng.choice(TEMPLATES).format(t=t).capitalize(), "url": f"https://www.youtube.com/watch?v={vid}",
-                        "published_at": (self.now - timedelta(days=rng.uniform(0.5, 28))).isoformat().replace("+00:00", "Z"),
-                        "duration_seconds": rng.randint(15, 58) if short else rng.randint(240, 1200), "views": int(rng.lognormvariate(10.5, 1.3)),
-                        "likes": int(rng.uniform(500, 40000)), "comments": int(rng.uniform(20, 2000)), "description": "[SAMPLE]", "tags": [t],
-                        "thumbnail_url": None, "category": "Howto & Style", "channel_id": cid, "channel_title": f"[SAMPLE] Creator {ch:02d}"})
-        return out
-
-    def trending_videos(self, region: str = "US", category_id: str | None = None, max_results: int = 50) -> list[dict]:
-        return self._sample_videos(f"trend{region}{category_id}", min(max_results, 30))
-
-    def search_videos(self, query: str, published_after=None, order: str = "viewCount", region: str | None = None, max_results: int = 50,
-                      short_only: bool = False) -> list[dict]:
-        vids = self._sample_videos(f"search{query}{region}", min(max_results, 30))
-        return [v for v in vids if v["duration_seconds"] <= 60] if short_only else vids
-
     def find_channel_candidates(self, queries: list[str], max_per_query: int = 50, published_after=None) -> list[dict]:
         """Illustrative stand-in for competitor discovery: 14 fake channels with declining 'hits'."""
         return [{"channel_id": f"rival_{i:02d}", "title": f"[SAMPLE] Rival_{i:02d}", "hits": max(1, 14 - i)} for i in range(1, 15)]
@@ -104,3 +79,15 @@ class SampleClient:
             ch["_query_id"] = cid
             out.append(ch)
         return out
+
+    def get_most_popular(self, region_code: str = "US", category_id: str | None = None, max_results: int = 25) -> list[dict]:
+        """Illustrative trending chart (not real data)."""
+        out = []
+        for i in range(1, 6):
+            b = self.fetch_channel_bundle(ParsedChannel("handle", f"@rival_{i:02d}"), max(6, max_results // 5))
+            for v in b["videos"][:max(1, max_results // 5)]:
+                v = dict(v)
+                v["views"] = int(v["views"] * 8)
+                v["title"] = "[SAMPLE] " + v["title"]
+                out.append(v)
+        return out[:max_results]

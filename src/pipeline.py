@@ -10,7 +10,6 @@ from src import channel_analysis as ca
 from src import competitor_analysis as comp_a
 from src import competitor_discovery as disc
 from src import content_gap_analysis as gaps_a
-from src import audience_profile as aprof
 from src import monetization as mon
 from src import roadmap as rm
 from src import title_analysis as ta
@@ -131,7 +130,6 @@ def run_analysis(client: Any, channel_input: str, competitor_inputs: list[str] |
     }
     results["roadmap"] = _roadmap(results)
     results["monetization"] = _monetization(results, now=now)
-    results["audience_profile"] = aprof.build_profile(results["videos"])
     step(1.0, "Done")
     return results
 

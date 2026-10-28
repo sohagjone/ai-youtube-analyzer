@@ -268,28 +268,15 @@ class YouTubeClient:
             notes.append(f"Only {len(videos)} public video(s) available for the selected sample/date range (requested {sample_size}).")
         return {"channel": channel, "videos": videos, "notes": notes}
 
-    # ------------------------------------------------------------------ trending / high-potential discovery (official API only)
-    def trending_videos(self, region: str = "US", category_id: str | None = None, max_results: int = 50) -> list[dict]:
-        """YouTube's own 'most popular' chart for a region (1 quota unit)."""
-        params: dict[str, Any] = {"part": "snippet,contentDetails,statistics", "chart": "mostPopular", "regionCode": region.upper()[:2],
-                                  "maxResults": max(1, min(int(max_results), 50))}
+    # ------------------------------------------------------------------ trending (official mostPopular chart)
+    def get_most_popular(self, region_code: str = "US", category_id: str | None = None, max_results: int = 25) -> list[dict]:
+        """YouTube's own 'most popular' chart for a region (1 quota unit). Some categories have no chart in some regions."""
+        params: dict[str, Any] = {"part": "snippet,contentDetails,statistics", "chart": "mostPopular",
+                                  "regionCode": region_code.upper(), "maxResults": max(1, min(int(max_results), 50))}
         if category_id:
             params["videoCategoryId"] = str(category_id)
         data = self._get("videos", params)
         return [self._normalise_video(v) for v in data.get("items", [])]
-
-    def search_videos(self, query: str, published_after: datetime | None = None, order: str = "viewCount", region: str | None = None,
-                      max_results: int = 50, short_only: bool = False) -> list[dict]:
-        """Videos matching a query (100 quota units + 1 per 50 videos)."""
-        params: dict[str, Any] = {"part": "snippet", "type": "video", "q": query.strip(), "order": order, "maxResults": max(1, min(int(max_results), 50))}
-        if published_after:
-            params["publishedAfter"] = published_after.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        if region:
-            params["regionCode"] = region.upper()[:2]
-        if short_only:
-            params["videoDuration"] = "short"
-        ids = [i["id"]["videoId"] for i in self._get("search", params).get("items", []) if (i.get("id") or {}).get("videoId")]
-        return self.get_videos(ids) if ids else []
 
     # ------------------------------------------------------------------ competitor discovery
     def find_channel_candidates(self, queries: list[str], max_per_query: int = 50,

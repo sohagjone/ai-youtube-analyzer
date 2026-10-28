@@ -1,105 +1,144 @@
-"""Shorts view-range predictor built from THIS channel's own Shorts.
+"""Shorts performance estimator built from YOUR channel's own Shorts history, with an honest back-test.
 
-Method: baseline = median views of the channel's settled Shorts; each feature group (title length, number, question, hashtag, duration band,
-weekend, topic) gets a shrunk effect from the channel's own history; the effects multiply the baseline. The uncertainty band comes from how
-wrong the method was on the channel's past Shorts (leave-one-out). If the features do NOT beat the plain-median baseline in that backtest,
-the tool says so and returns the plain baseline range. It predicts views a Short typically reaches after it has settled (about 2 weeks+),
-not virality, and cannot see audience retention or impressions (private to the owner).
+What it does: baseline = median views of your mature Shorts; optional adjustments for topic, title pattern, weekday and length
+(each shrunk toward 'no effect' when samples are small); an uncertainty range from how much your Shorts actually vary.
+Back-test: it predicts each of your past Shorts using all the OTHER Shorts and reports how often reality fell in the range, and
+whether the adjustments beat the plain baseline. If they do not, the estimate uses the baseline only.
+It is an estimate of typical outcomes, not a forecast: no model can know whether a given Short will take off.
 """
 from __future__ import annotations
-
-import re
 
 import numpy as np
 import pandas as pd
 
-from src.audience_profile import SHORT_FMT, extract_hashtags
+from src.title_analysis import classify_pattern
 
-MIN_SHORTS = 8
-FEATURES = ["title_len", "has_number", "has_question", "has_hashtag", "duration_band", "weekend", "topic"]
-CAP = (0.6, 1.7)
-
-
-def _title_len(n: int) -> str:
-    return "<=30 chars" if n <= 30 else "31-55 chars" if n <= 55 else ">55 chars"
-
-
-def _dur_band(s: float) -> str:
-    return "<=15s" if s <= 15 else "16-30s" if s <= 30 else "31-45s" if s <= 45 else "46-60s" if s <= 60 else ">60s"
+SHORT = "Short-form (<=3 min)"
+MATURE_DAYS = 14
+SHRINK_K = 5.0
+FACTOR_CLAMP = (0.6, 1.6)
+MIN_FOR_MODEL = 8
+LENGTH_BINS = [(0, 20, "up to 20s"), (20, 40, "20-40s"), (40, 60, "40-60s"), (60, 181, "1-3 min")]
 
 
-def feature_row(title: str, duration_s: float, publish_dt: pd.Timestamp | None, description: str = "", topic: str = "") -> dict:
-    wk = publish_dt.dayofweek >= 5 if publish_dt is not None else False
-    return {"title_len": _title_len(len(title)), "has_number": bool(re.search(r"\d", title)),
-            "has_question": "?" in title or title.lower().split(" ")[0:1] in (["how"], ["why"], ["what"], ["is"], ["can"]),
-            "has_hashtag": bool(extract_hashtags(title, description)), "duration_band": _dur_band(duration_s),
-            "weekend": bool(wk), "topic": topic or ""}
+def length_bucket(seconds: float) -> str:
+    for lo, hi, label in LENGTH_BINS:
+        if lo <= seconds < hi:
+            return label
+    return LENGTH_BINS[-1][2]
 
 
-def shorts_pool(df: pd.DataFrame, min_age: float = 14) -> pd.DataFrame:
-    s = df[df["format"] == SHORT_FMT].copy()
-    s = s[s["age_days"] >= min_age] if (s["age_days"] >= min_age).sum() >= MIN_SHORTS else s
-    if s.empty:
-        return s
-    rows = [feature_row(r.title, r.duration_seconds, pd.Timestamp(r.published_at), r.description, getattr(r, "topic", "")) for r in s.itertuples()]
-    feats = pd.DataFrame(rows)
-    return pd.concat([s.drop(columns=[c for c in feats.columns if c in s.columns]).reset_index(drop=True), feats], axis=1)
+def _topic_of(title: str, known_topics: list[str]) -> str:
+    low = title.lower()
+    for t in sorted(known_topics, key=len, reverse=True):
+        if t.lower() in low:
+            return t
+    return "Other / unclassified"
 
 
-def _effects(pool: pd.DataFrame, base: float, k: int = 4) -> dict:
-    out: dict[str, dict] = {}
-    for f in FEATURES:
-        if f not in pool:
+def _shrunk(group_median_rel: float, n: int) -> float:
+    f = (n * group_median_rel + SHRINK_K * 1.0) / (n + SHRINK_K)
+    return float(np.clip(f, *FACTOR_CLAMP))
+
+
+def _features(row: dict) -> dict:
+    return {"topic": row["topic"], "pattern": row["pattern"], "weekday": row["weekday"], "length": row["length"]}
+
+
+def _prep(shorts: pd.DataFrame, known_topics: list[str]) -> pd.DataFrame:
+    d = shorts.copy()
+    d["topic"] = d["topic"] if "topic" in d else d["title"].apply(lambda t: _topic_of(t, known_topics))
+    d["pattern"] = d["title"].apply(classify_pattern)
+    d["weekday"] = d["published_at"].dt.dayofweek
+    d["length"] = d["duration_seconds"].apply(length_bucket)
+    return d
+
+
+def _model(train: pd.DataFrame) -> dict:
+    base = float(train["views"].median())
+    rel = train["views"] / base if base > 0 else train["views"] * 0 + 1
+    tab = {}
+    for feat in ("topic", "pattern", "weekday", "length"):
+        g = pd.DataFrame({"k": train[feat], "rel": rel}).groupby("k")["rel"].agg(["median", "count"])
+        tab[feat] = {k: (_shrunk(float(r["median"]), int(r["count"])), int(r["count"])) for k, r in g.iterrows()}
+    resid = (train["views"] / base).clip(lower=1e-3)
+    return {"base": base, "tab": tab, "q25": float(resid.quantile(0.25)), "q75": float(resid.quantile(0.75))}
+
+
+def _predict(m: dict, feats: dict, use_factors: bool) -> tuple[float, dict]:
+    used = {}
+    f = 1.0
+    if use_factors:
+        for feat, val in feats.items():
+            fac, n = m["tab"].get(feat, {}).get(val, (1.0, 0))
+            used[feat] = (val, fac, n)
+            f *= fac
+        f = float(np.clip(f, 0.4, 2.5))
+    return m["base"] * f, used
+
+
+def backtest(d: pd.DataFrame) -> dict:
+    """Leave-one-out: for each mature Short, predict from the others. Compares factors vs baseline-only."""
+    errs_f, errs_b, inside = [], [], []
+    for i in d.index:
+        train = d.drop(index=i)
+        m = _model(train)
+        actual = float(d.loc[i, "views"])
+        if actual <= 0 or m["base"] <= 0:
             continue
-        g = {}
-        for grp, sub in pool.groupby(f):
-            n = len(sub)
-            raw = float(sub["views"].median()) / base if base > 0 else 1.0
-            g[grp] = (float(np.clip(1.0 + (raw - 1.0) * n / (n + k), *CAP)), n)
-        out[f] = g
+        pf, _ = _predict(m, _features(d.loc[i].to_dict()), True)
+        pb, _ = _predict(m, {}, False)
+        errs_f.append(abs(np.log(max(pf, 1) / actual)))
+        errs_b.append(abs(np.log(max(pb, 1) / actual)))
+        inside.append(pb * m["q25"] <= actual <= pb * m["q75"])
+    if not errs_f:
+        return {"n": 0}
+    return {"n": len(errs_f), "median_abs_pct_error_baseline": float(np.expm1(np.median(errs_b))),
+            "median_abs_pct_error_with_factors": float(np.expm1(np.median(errs_f))),
+            "share_inside_range": float(np.mean(inside)), "factors_help": bool(np.median(errs_f) < np.median(errs_b) * 0.97)}
+
+
+def predict_short(results: dict, title: str, duration_seconds: float, weekday: int | None = None, topic: str | None = None) -> dict:
+    """Estimate typical views at maturity (about 14+ days) for a planned Short. weekday: 0=Mon..6=Sun (UTC) or None."""
+    df = results["videos"]
+    shorts = df[(df["format"] == SHORT) & (df["age_days"] >= MATURE_DAYS)]
+    known = [t for t in results["topics"]["topic"].tolist() if not str(t).startswith("Other")] if len(results.get("topics", [])) else []
+    notes = ["Estimate of typical views at maturity (14+ days), based on your own public Short history. Not a forecast and not a guarantee."]
+    n = len(shorts)
+    out: dict = {"available": False, "n_shorts": n, "notes": notes}
+    if n >= 3:
+        d = _prep(shorts, known)
+        m = _model(d)
+        bt = backtest(d) if n >= MIN_FOR_MODEL else {"n": 0}
+        use_factors = bool(bt.get("factors_help"))
+        feats = {"topic": topic or _topic_of(title, known), "pattern": classify_pattern(title),
+                 "weekday": weekday if weekday is not None else -1, "length": length_bucket(duration_seconds)}
+        est, used = _predict(m, feats, use_factors)
+        confidence = "High" if n >= 25 else "Medium" if n >= 12 else "Low"
+        if bt.get("n", 0) and not use_factors:
+            notes.append("Back-test: topic/title/weekday/length adjustments did NOT beat your plain Shorts median, so the estimate uses the median only.")
+        if n < MIN_FOR_MODEL:
+            notes.append(f"Only {n} mature Shorts - using their median with a wide range (adjustments need {MIN_FOR_MODEL}+).")
+        out.update(available=True, method="Your Shorts history", baseline=m["base"], estimate_mid=est, estimate_low=est * m["q25"],
+                   estimate_high=est * m["q75"], factors_used=use_factors, factors=pd.DataFrame(
+                       [{"feature": k, "value": str(v[0]), "factor": round(v[1], 2), "similar_shorts": v[2]} for k, v in used.items()]),
+                   backtest=bt, confidence=confidence)
+        out["range_note"] = "Range = how widely your own Shorts' views spread (25th-75th percentile of your Shorts relative to their median); about half of results fall inside, and some fall outside."
+        return out
+    # fallback: size-adjusted peers
+    subs = results["channel"].get("subscribers")
+    peer_rates = []
+    for name, cdf in results.get("competitor_videos", {}).items():
+        ch = results.get("competitor_channels", {}).get(name, {})
+        ps = cdf[(cdf["format"] == SHORT) & (cdf["age_days"] >= MATURE_DAYS)]
+        if len(ps) >= 5 and ch.get("subscribers"):
+            peer_rates.append(float(ps["views"].median()) / ch["subscribers"])
+    if subs and len(peer_rates) >= 3:
+        base = float(np.median(peer_rates)) * subs
+        out.update(available=True, method="Peers' Shorts scaled to your subscriber count", baseline=base, estimate_mid=base,
+                   estimate_low=base * 0.25, estimate_high=base * 3.0, factors_used=False, factors=pd.DataFrame(), backtest={"n": 0}, confidence="Low",
+                   range_note="Very wide range: you have too few Shorts of your own, so this uses similar channels' Shorts scaled by audience size.")
+        notes.append(f"You have {n} mature Short(s) (3 needed). Peer-based estimate shown instead; treat it as a rough starting point only.")
+    else:
+        out["reason"] = f"Needs at least 3 of your Shorts that are {MATURE_DAYS}+ days old (you have {n}), or 3+ peers with Shorts and a public subscriber count."
     return out
-
-
-def _apply(effects: dict, row: dict) -> tuple[float, list[dict]]:
-    mult, drivers = 1.0, []
-    for f, groups in effects.items():
-        v = row.get(f)
-        if v in groups:
-            e, n = groups[v]
-            mult *= e
-            drivers.append({"feature": f, "value": str(v), "effect": round(e, 2), "history_videos": n})
-    return float(np.clip(mult, 0.4, 2.5)), drivers
-
-
-def predict(df: pd.DataFrame, row: dict) -> dict:
-    pool = shorts_pool(df)
-    n = len(pool)
-    if n < MIN_SHORTS:
-        return {"available": False, "n": n, "message": f"Need at least {MIN_SHORTS} Shorts in the analysed sample to predict (found {n}). Raise 'Videos analysed' in the sidebar."}
-    views = pool["views"].to_numpy(dtype=float)
-    base = float(np.median(views))
-    # leave-one-out backtest: does using the features beat the plain median?
-    err_m, err_n, ratios = [], [], []
-    for i in range(n):
-        rest = pool.drop(index=i)
-        b = float(rest["views"].median())
-        mult, _ = _apply(_effects(rest, b), pool.iloc[i].to_dict())
-        pred = max(b * mult, 1.0)
-        err_m.append(abs(np.log(max(views[i], 1) / pred)))
-        err_n.append(abs(np.log(max(views[i], 1) / max(b, 1))))
-        ratios.append(np.log(max(views[i], 1) / pred))
-    beats = float(np.median(err_m)) < float(np.median(err_n)) * 0.97
-    eff = _effects(pool, base)
-    mult, drivers = _apply(eff, row) if beats else (1.0, [])
-    center = base * mult
-    resid = np.array(ratios if beats else [np.log(max(v, 1) / base) for v in views])
-    lo, hi = float(np.exp(np.quantile(resid, 0.2))) * center, float(np.exp(np.quantile(resid, 0.8))) * center
-    prob = float((center * np.exp(resid) > base).mean())
-    conf = "high" if n >= 40 else "medium" if n >= 20 else "low"
-    return {"available": True, "n": n, "baseline_median": base, "multiplier": round(mult, 2), "expected_median": center, "range_low": lo, "range_high": hi,
-            "chance_above_channel_median": prob, "features_beat_baseline": beats, "backtest_error_model": float(np.median(err_m)),
-            "backtest_error_baseline": float(np.median(err_n)), "confidence": conf, "drivers": drivers,
-            "message": ("Your Shorts' features carried measurable signal in a backtest, so they adjust the estimate." if beats else
-                        "In a backtest your title/format features did NOT predict your past Shorts better than the plain median, so the range below is the channel's typical Shorts range, not a feature-based estimate."),
-            "caveats": ["Estimates settled views (after ~2 weeks), not first-day views or virality.", "Public data excludes retention, impressions and traffic sources; the biggest drivers of Shorts reach are not visible here.",
-                        f"Based on {n} of your Shorts; ranges are wide on small samples. It is a planning aid, not a promise."]}

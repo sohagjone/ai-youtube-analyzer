@@ -28,3 +28,11 @@ def results(now):
     r = run_analysis(SampleClient(now), "@sample_own", [], sample_size=40, now=now, auto_competitors=10)
     r["calendar"] = generate_calendar(r["gaps"], r["topics"], days=7, posts_per_week=3, start=now.date())
     return r
+
+
+def goto(at, label_contains):
+    """Select a section in the app's persistent navigation and rerun."""
+    radio = at.radio(key="active_tab")
+    target = next(o for o in radio.options if label_contains in o)
+    radio.set_value(target)
+    return at.run()
