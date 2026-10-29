@@ -139,3 +139,57 @@ def analyze_bytes(data: bytes, suffix: str = ".mp4") -> dict:
     finally:
         if os.path.exists(name):
             os.remove(name)
+
+
+def extract_frames(path: str | Path, n: int = 6, width: int = 512, duration: float | None = None) -> list[bytes]:
+    """JPEG frames evenly spaced through the video (used only for AI understanding; never stored)."""
+    dur = duration or (probe(path).get("duration_seconds") or 0)
+    if dur <= 0:
+        return []
+    times = [dur * (i + 0.5) / n for i in range(n)]
+    frames: list[bytes] = []
+    for t in times:
+        res = _run(["-ss", f"{t:.2f}", "-i", str(path), "-frames:v", "1", "-vf", f"scale={width}:-2", "-q:v", "5", "-f", "image2pipe", "-vcodec", "mjpeg", "-"],
+                   timeout=60, binary=True)
+        if res.stdout:
+            frames.append(res.stdout)
+    return frames
+
+
+def transcribe(path: str | Path, seconds: int = 180) -> str | None:
+    """Optional local speech-to-text with faster-whisper when it is installed (not in requirements by default). None if unavailable."""
+    try:
+        from faster_whisper import WhisperModel  # type: ignore
+    except Exception:  # noqa: BLE001 - optional dependency
+        return None
+    import os
+    import tempfile
+    fd, wav = tempfile.mkstemp(suffix=".wav")
+    os.close(fd)
+    try:
+        _run(["-y", "-t", str(seconds), "-i", str(path), "-vn", "-ac", "1", "-ar", "16000", wav], timeout=120)
+        segments, _info = WhisperModel("tiny", device="cpu", compute_type="int8").transcribe(wav)
+        text = " ".join(s.text.strip() for s in segments).strip()
+        return text or None
+    except Exception:  # noqa: BLE001 - never break the analysis because transcription failed
+        return None
+    finally:
+        if os.path.exists(wav):
+            os.remove(wav)
+
+
+def analyze_bytes_full(data: bytes, suffix: str = ".mp4", frames: int = 6, with_transcript: bool = True) -> tuple[dict, list[bytes], str | None]:
+    """Probe + frames + optional transcript from an upload. The temporary file is ALWAYS deleted."""
+    import os
+    import tempfile
+    fd, name = tempfile.mkstemp(suffix=suffix if suffix.startswith(".") else "." + suffix)
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+        info = analyze_video(name)
+        fr = extract_frames(name, frames, duration=info.get("duration_seconds"))
+        tr = transcribe(name) if (with_transcript and info.get("has_audio")) else None
+        return info, fr, tr
+    finally:
+        if os.path.exists(name):
+            os.remove(name)

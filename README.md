@@ -12,17 +12,29 @@ Analyse a YouTube channel's **public** performance, compare up to five competito
 - **Demo mode**: clearly labelled sample data when no API key is configured on the server.
 - Colourful, responsive dashboard theme.
 
-## Trend Radar and Video Studio (new)
-**🔥 Trend Radar** - YouTube's official most-popular chart (by region/category) plus "high-potential" recent videos from up to 10 creators you paste. A video is flagged when its views per day are well above that creator's *own* usual pace. Trending words feed the title/hashtag generator. **YouTube only, via the official API**: TikTok, Instagram, X and similar platforms have no public API for this and scraping them breaks their terms, so they are not scraped.
+## Trend Radar and Video Studio
+**🔥 Trend Radar** - pick a niche (Football, Gaming, Tech, Food...) or type your own keywords and the app searches the platforms the owner has connected, **using official APIs only (no scraping)**, then ranks the fastest-moving videos with a per-platform *viral score* (a percentile within that platform's results, because metrics differ), hashtags used by the high scorers, and what the fastest videos share. Also: YouTube's official most-popular chart and a creator watch-list.
 
-**🎬 Video Studio** - upload a video (optional) and describe it. The file is analysed temporarily with a bundled ffmpeg (`imageio-ffmpeg`) and deleted immediately.
-1. **Editing and music advice** - measured loudness (LUFS), true peak, silent gaps, visual cuts per minute, hook in the first 5 s, framing/resolution, rough tempo; plus a mood/BPM direction for your detected niche. Each item says whether it is *measured*, *from your channel data* or a *rule of thumb*. No track is recommended by name; use music you own or have licensed.
-2. **Title, caption and hashtags** - ranked titles with a transparent "channel fit" score (your best title pattern, length, keyword placement, specificity, risky wording, duplicates). Optional AI titles are scored the same way. Hashtags respect YouTube's limits (first 3 shown above the title; more than 15 and YouTube ignores them all).
-3. **Shorts performance estimator** - typical views at maturity from your own Shorts history, a range from how widely your Shorts actually vary, and a leave-one-out **back-test**. Topic/title/weekday/length adjustments are used only if they beat the plain median in that back-test.
-4. **Upload planner** - best weekday/3-hour slots in your time zone from your own mature videos (shrunk toward a prior so thin slots cannot dominate; peers count half), reliability rating, slots to avoid, and a 14-day schedule matched to your roadmap's cadence goal.
-5. **Copyright and reused-content risk screen** - checklist and text screen from your declarations (music, footage, commentary, AI/templated, re-upload), risky wording, and near-duplicates of your own or other channels' titles.
+| Platform | Needs (in Streamlit secrets) | Notes |
+|---|---|---|
+| YouTube | `YOUTUBE_API_KEY` | search.list + videos.list (about 200 quota units per search) |
+| X | `X_BEARER_TOKEN` | recent search (last 7 days), `has:videos`; needs an API plan that allows search |
+| TikTok | `TIKTOK_CLIENT_KEY`, `TIKTOK_CLIENT_SECRET` | **Research API - approved researchers only**; 30-day windows |
+| Instagram | `META_ACCESS_TOKEN`, `INSTAGRAM_BUSINESS_ACCOUNT_ID` | hashtag search (popular posts, no view counts; 30 unique hashtags per 7 days; needs Instagram Public Content Access) |
+| Facebook | - | no public video search API exists (CrowdTangle was shut down), so it is not scraped |
 
-Honest limits: "subscribers' behaviour" is inferred from **public** proxies (views, views/day, likes+comments, formats, lengths, publishing times); retention and demographics are private. The Shorts estimate is a typical-outcome range, not a forecast. The copyright screen **cannot** detect Content ID matches or recognise music/footage and is not legal advice - upload as Private and read YouTube Studio's *Checks* before publishing.
+The X, TikTok and Instagram connectors follow those platforms' published API formats and are covered by mocked-request tests, but **could not be run against the live APIs here** - try each with your credentials and tell me if a platform rejects a request. Unconnected platforms simply show "not connected".
+
+**🎬 Video Studio** - upload a video; the app analyses it automatically.
+1. **Measured facts** (bundled ffmpeg via `imageio-ffmpeg`): loudness (LUFS), peak, silence, cuts per minute, hook, framing, rough tempo. The file is deleted immediately.
+2. **AI understanding** (needs `AI_API_KEY`): a few sampled frames (plus an optional local transcript if `faster-whisper` is installed) go to your AI provider, which returns the topic, summary, key moments, mood, draft titles/description/tags and music mood. It is told not to identify people or invent facts, and to flag possible rights issues as uncertain. **Without an AI key the app cannot see what your video is about** and uses only the text you type.
+3. **Recommended title, description, tags and hashtags**, titles ranked by *channel fit* (your best pattern, length, keyword placement, risky wording, duplicates).
+4. **Probable performance**: views (from your own history in that format, with a back-test), **new subscribers** (views x your lifetime subscribers-per-view ratio, range from similar channels), likes/comments (your own rates) and **watch hours** (rests on an *editable average-%-watched assumption* because watch time is not public). These are ranges and rough estimates, not forecasts.
+5. **Your upload vs competitors**: length, title, expected engagement and size-adjusted views against the discovered peers' typical range, plus the closest competitor videos.
+6. **Upload schedule** from your own mature videos' best weekday/time slots (your time zone) and a 14-day plan.
+7. **Editing and music advice** (measured, from your channel data, or rule of thumb - labelled) and a copyright/reused-content **risk screen**.
+
+Honest limits: "subscribers' behaviour" is inferred from **public** proxies (retention and demographics are private). The copyright screen **cannot** detect Content ID matches and is not legal advice - upload as Private and read YouTube Studio's *Checks*.
 
 Navigation uses persistent pills (not `st.tabs`), so pressing a button keeps you on the section you are working in.
 

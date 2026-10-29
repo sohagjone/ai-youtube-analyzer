@@ -98,51 +98,73 @@ def audience_summary(ctx: dict) -> list[str]:
 
 # ----------------------------------------------------------------------------- orchestrator
 def run_studio(results: dict, inputs: dict, probe: dict | None = None, provider=None, trending_terms: list[str] | None = None,
-               reference_titles: list[str] | None = None, now_local=None) -> dict:
-    """Run every Video Studio feature for one planned video. `inputs`: title, topic, summary, description, format ('Short'|'Long-form'|'Auto'),
-    tz, music, footage, commentary, lyrics_or_scripts, ai_generated, templated, reupload, goal, music_credit, weekday (optional)."""
+               reference_titles: list[str] | None = None, now_local=None, frames: list[bytes] | None = None, transcript: str | None = None,
+               pct_watched: float | None = None) -> dict:
+    """Run every Video Studio feature for one planned video.
+    `inputs`: title, topic, summary, description, format ('Short'|'Long-form'|'Auto'), tz, music, footage, commentary, lyrics_or_scripts,
+    ai_generated, templated, reupload, goal, music_credit, weekday (optional). `frames`/`transcript` enable AI understanding of the video."""
     from datetime import datetime
 
+    from src import benchmarks as bm
     from src import copy_generator as cg
     from src import copyright_risk as cr
     from src import editing_advice as ea
+    from src import growth_predictor as gp
     from src import shorts_predictor as sp
     from src import upload_planner as up
+    from src import video_understanding as vu
 
     ctx = build_context(results, trending_terms)
-    topic = (inputs.get("topic") or inputs.get("title") or "").strip()
-    fmt = inputs.get("format", "Auto")
     dur = (probe or {}).get("duration_seconds")
+    fmt = inputs.get("format", "Auto")
     if fmt == "Auto":
         fmt = "Short" if (dur is not None and dur <= 180 and (probe or {}).get("orientation") == "vertical") or (dur is not None and dur <= 60) else "Long-form"
-    out: dict = {"inputs": {k: v for k, v in inputs.items()}, "format": fmt, "context": {k: v for k, v in ctx.items() if k not in ("topics", "own_titles", "format_table")},
-                 "audience_summary": audience_summary(ctx), "probe": probe}
-    # 1) editing + music
+    # 0) automatic understanding of the video itself
+    ai_note = ""
+    try:
+        und = vu.understand(provider, frames or [], probe, " ".join(x for x in (inputs.get("title", ""), inputs.get("topic", ""), inputs.get("summary", "")) if x),
+                            transcript, ctx.get("niche", ""))
+    except Exception as exc:  # noqa: BLE001 - AI is optional; fall back to the user's text
+        und = vu.fallback(inputs.get("title", ""), inputs.get("topic", ""), inputs.get("summary", ""))
+        if frames and provider is not None and getattr(provider, "is_configured", False):
+            ai_note = f"AI understanding failed ({exc}); using your text only."
+    topic = (inputs.get("topic") or und.get("topic") or inputs.get("title") or "").strip()
+    summary = (inputs.get("summary") or und.get("summary") or "").strip()
+    out: dict = {"inputs": dict(inputs), "format": fmt, "understanding": und, "ai_note": ai_note, "audience_summary": audience_summary(ctx), "probe": probe,
+                 "context": {k: v for k, v in ctx.items() if k not in ("topics", "own_titles", "format_table")}}
+    out["topic_used"] = topic
+    # 1) editing + music (+ AI mood from the footage)
     music_status = inputs.get("music_status") or {"unsure": "not decided"}.get(inputs.get("music", "unsure"), inputs.get("music", "unsure"))
     out["editing_advice"] = ea.advise(probe, ctx, fmt, music_status)
     out["music"] = ea.music_recommendation(ctx, fmt == "Short", (probe or {}).get("tempo"))
-    # 2) title / caption / hashtags
-    extra, ai_note = [], ""
-    if provider is not None and getattr(provider, "is_configured", False) and topic:
-        try:
-            extra = cg.ai_titles(provider, topic, inputs.get("summary", ""), ctx, fmt)
-        except Exception as exc:  # noqa: BLE001 - AI is optional
-            ai_note = f"AI titles unavailable ({exc}); templates used."
-    titles = cg.rank_titles(topic, ctx, inputs.get("summary", ""), fmt, extra) if topic else pd.DataFrame()
+    if und.get("music_mood"):
+        out["music"]["ai_mood"] = und["music_mood"]
+    # 2) titles / description / tags
+    ctx_gen = {**ctx, "top_tags": list(dict.fromkeys([t.lower() for t in und.get("hashtags", [])] + [t.lower() for t in und.get("tags", [])[:4]] + ctx.get("top_tags", [])))}
+    titles = cg.rank_titles(topic, ctx_gen, summary, fmt, und.get("title_ideas", [])) if topic else pd.DataFrame()
     if inputs.get("title", "").strip():
-        mine = pd.DataFrame([cg.score_title(inputs["title"].strip(), ctx, set())]).assign(source="Your draft")
+        mine = pd.DataFrame([cg.score_title(inputs["title"].strip(), ctx_gen, set())]).assign(source="Your draft")
         titles = pd.concat([mine, titles], ignore_index=True) if len(titles) else mine
-    out["titles"], out["ai_note"] = titles, ai_note
-    tags = cg.hashtags(topic or inputs.get("title", ""), ctx, fmt) if (topic or inputs.get("title")) else {"hashtags": [], "above_title": [], "hidden_tags": "", "note": ""}
+    out["titles"] = titles
+    tags = cg.hashtags(topic or inputs.get("title", ""), ctx_gen, fmt) if (topic or inputs.get("title")) else {"hashtags": [], "above_title": [], "hidden_tags": "", "note": ""}
+    if und.get("tags"):
+        tags["hidden_tags"] = ", ".join(dict.fromkeys([t.lower() for t in und["tags"]] + [x.strip() for x in tags["hidden_tags"].split(",") if x.strip()]))[:480]
     out["hashtags"] = tags
     best_title = titles.sort_values("fit_score", ascending=False).iloc[0]["title"] if len(titles) else inputs.get("title", "")
-    out["caption"] = cg.caption(topic, best_title, inputs.get("summary", ""), fmt, tags["hashtags"], inputs.get("goal", "subscribers"), inputs.get("music_credit", ""))
-    # 3) Shorts predictor
-    if fmt == "Short":
-        out["shorts"] = sp.predict_short(results, best_title or topic, float(dur or 30), inputs.get("weekday"), None)
+    if und.get("description"):
+        cap = und["description"].strip() + "\n\n" + (f"Music: {inputs['music_credit'].strip()}" if inputs.get("music_credit", "").strip() else "Music: [track] by [artist] - [licence / link]") + "\n\n" + " ".join(tags["hashtags"][:cg.MAX_HASHTAG_SAFE])
+        out["caption"] = f"{best_title}\n\n{cap}"
     else:
-        out["shorts"] = {"available": False, "reason": "Planned as long-form; the Shorts predictor only runs for Shorts."}
-    # 4) upload planner
+        out["caption"] = cg.caption(topic, best_title, summary, fmt, tags["hashtags"], inputs.get("goal", "subscribers"), inputs.get("music_credit", ""))
+    # 3) predicted performance (views -> subscribers / engagement / watch time) for ANY format
+    views = sp.predict_views(results, best_title or topic, float(dur or (30 if fmt == "Short" else 600)), inputs.get("weekday"), None, fmt)
+    out["views"] = views
+    out["forecast"] = gp.forecast(results, views, fmt, float(dur or (30 if fmt == "Short" else 600)), pct_watched)
+    out["shorts"] = views if fmt == "Short" else {"available": False, "reason": "Planned as long-form; see the predicted performance section."}
+    # 4) competitors vs this upload
+    out["comparison"] = bm.compare(results, fmt, best_title or topic, float(dur) if dur else None, views, out["forecast"])
+    out["closest"] = bm.closest_videos(results, f"{topic} {best_title} {summary}")
+    # 5) upload planner
     tz = inputs.get("tz", "UTC")
     slots = up.slot_table(results["videos"], tz, results.get("competitor_videos"))
     rec = up.recommend(slots)
@@ -160,12 +182,12 @@ def run_studio(results: dict, inputs: dict, probe: dict | None = None, provider=
     now_local = now_local or datetime.now(up.tz_of(tz))
     out["planner"] = {"slots": slots, "best": rec["best"], "avoid": rec["avoid"], "reliability": rel_lvl, "reliability_note": rel_txt,
                       "plan": up.plan_uploads(slots, cad, ideas, now_local), "tz": tz, "uploads_per_30_days_goal": cad}
-    # 5) copyright / reuse risk
+    # 6) copyright / reuse risk
     rep = results.get("repeated_structures")
     share = float(rep["videos"].max() / len(results["videos"])) if rep is not None and len(rep) and len(results["videos"]) else None
-    out["copyright"] = cr.screen(inputs.get("title", "") or best_title, inputs.get("description", "") or inputs.get("summary", ""), None,
+    out["copyright"] = cr.screen(inputs.get("title", "") or best_title, inputs.get("description", "") or summary, None,
                                  {"music": inputs.get("music", "unsure"), "footage": inputs.get("footage", "unsure"), "commentary": inputs.get("commentary", False),
                                   "lyrics_or_scripts": inputs.get("lyrics_or_scripts", False), "ai_generated": inputs.get("ai_generated", False),
                                   "templated": inputs.get("templated", False), "reupload": inputs.get("reupload", False)},
-                                 ctx.get("own_titles", []), reference_titles, share)
+                                 ctx.get("own_titles", []), reference_titles, share, und.get("rights_flags"))
     return out

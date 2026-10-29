@@ -15,6 +15,8 @@ from src.title_analysis import classify_pattern
 
 SHORT = "Short-form (<=3 min)"
 MATURE_DAYS = 14
+MATURE_DAYS_BY_FORMAT = {"Short": 14, "Long-form": 28}
+FORMAT_LABEL = {"Short": SHORT, "Long-form": "Long-form (>3 min)"}
 SHRINK_K = 5.0
 FACTOR_CLAMP = (0.6, 1.6)
 MIN_FOR_MODEL = 8
@@ -100,10 +102,17 @@ def backtest(d: pd.DataFrame) -> dict:
 
 def predict_short(results: dict, title: str, duration_seconds: float, weekday: int | None = None, topic: str | None = None) -> dict:
     """Estimate typical views at maturity (about 14+ days) for a planned Short. weekday: 0=Mon..6=Sun (UTC) or None."""
+    return predict_views(results, title, duration_seconds, weekday, topic, "Short")
+
+
+def predict_views(results: dict, title: str, duration_seconds: float, weekday: int | None = None, topic: str | None = None, fmt: str = "Short") -> dict:
+    """Typical views at maturity (14+ days for Shorts, 28+ for long-form) from your own history in the same format; weekday: 0=Mon..6=Sun (UTC)."""
+    fmt_label, mature = FORMAT_LABEL.get(fmt, SHORT), MATURE_DAYS_BY_FORMAT.get(fmt, MATURE_DAYS)
+    noun = "Shorts" if fmt == "Short" else "long-form videos"
     df = results["videos"]
-    shorts = df[(df["format"] == SHORT) & (df["age_days"] >= MATURE_DAYS)]
+    shorts = df[(df["format"] == fmt_label) & (df["age_days"] >= mature)]
     known = [t for t in results["topics"]["topic"].tolist() if not str(t).startswith("Other")] if len(results.get("topics", [])) else []
-    notes = ["Estimate of typical views at maturity (14+ days), based on your own public Short history. Not a forecast and not a guarantee."]
+    notes = [f"Estimate of typical views at maturity ({mature}+ days), based on your own public {noun} history. Not a forecast and not a guarantee."]
     n = len(shorts)
     out: dict = {"available": False, "n_shorts": n, "notes": notes}
     if n >= 3:
@@ -116,29 +125,29 @@ def predict_short(results: dict, title: str, duration_seconds: float, weekday: i
         est, used = _predict(m, feats, use_factors)
         confidence = "High" if n >= 25 else "Medium" if n >= 12 else "Low"
         if bt.get("n", 0) and not use_factors:
-            notes.append("Back-test: topic/title/weekday/length adjustments did NOT beat your plain Shorts median, so the estimate uses the median only.")
+            notes.append("Back-test: topic/title/weekday/length adjustments did NOT beat your plain median, so the estimate uses the median only.")
         if n < MIN_FOR_MODEL:
-            notes.append(f"Only {n} mature Shorts - using their median with a wide range (adjustments need {MIN_FOR_MODEL}+).")
-        out.update(available=True, method="Your Shorts history", baseline=m["base"], estimate_mid=est, estimate_low=est * m["q25"],
+            notes.append(f"Only {n} mature {noun} - using their median with a wide range (adjustments need {MIN_FOR_MODEL}+).")
+        out.update(available=True, method=f"Your {noun} history", baseline=m["base"], estimate_mid=est, estimate_low=est * m["q25"],
                    estimate_high=est * m["q75"], factors_used=use_factors, factors=pd.DataFrame(
                        [{"feature": k, "value": str(v[0]), "factor": round(v[1], 2), "similar_shorts": v[2]} for k, v in used.items()]),
                    backtest=bt, confidence=confidence)
-        out["range_note"] = "Range = how widely your own Shorts' views spread (25th-75th percentile of your Shorts relative to their median); about half of results fall inside, and some fall outside."
+        out["range_note"] = "Range = how widely your own Shorts' views spread (25th-75th percentile of your videos in this format relative to their median); about half of results fall inside, and some fall outside."
         return out
     # fallback: size-adjusted peers
     subs = results["channel"].get("subscribers")
     peer_rates = []
     for name, cdf in results.get("competitor_videos", {}).items():
         ch = results.get("competitor_channels", {}).get(name, {})
-        ps = cdf[(cdf["format"] == SHORT) & (cdf["age_days"] >= MATURE_DAYS)]
+        ps = cdf[(cdf["format"] == fmt_label) & (cdf["age_days"] >= mature)]
         if len(ps) >= 5 and ch.get("subscribers"):
             peer_rates.append(float(ps["views"].median()) / ch["subscribers"])
     if subs and len(peer_rates) >= 3:
         base = float(np.median(peer_rates)) * subs
-        out.update(available=True, method="Peers' Shorts scaled to your subscriber count", baseline=base, estimate_mid=base,
+        out.update(available=True, method=f"Peers' {noun} scaled to your subscriber count", baseline=base, estimate_mid=base,
                    estimate_low=base * 0.25, estimate_high=base * 3.0, factors_used=False, factors=pd.DataFrame(), backtest={"n": 0}, confidence="Low",
                    range_note="Very wide range: you have too few Shorts of your own, so this uses similar channels' Shorts scaled by audience size.")
-        notes.append(f"You have {n} mature Short(s) (3 needed). Peer-based estimate shown instead; treat it as a rough starting point only.")
+        notes.append(f"You have {n} mature {noun} (3 needed). Peer-based estimate shown instead; treat it as a rough starting point only.")
     else:
-        out["reason"] = f"Needs at least 3 of your Shorts that are {MATURE_DAYS}+ days old (you have {n}), or 3+ peers with Shorts and a public subscriber count."
+        out["reason"] = f"Needs at least 3 of your {noun} that are {mature}+ days old (you have {n}), or 3+ peers with the same format and a public subscriber count."
     return out

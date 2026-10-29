@@ -32,7 +32,7 @@ def _row(sev: str, issue: str, why: str, action: str, pts: int) -> dict:
 
 
 def screen(title: str, description: str, tags: list[str] | None, declared: dict, own_titles: list[str] | None = None,
-           reference_titles: list[str] | None = None, repeated_structure_share: float | None = None) -> dict:
+           reference_titles: list[str] | None = None, repeated_structure_share: float | None = None, ai_flags: list[str] | None = None) -> dict:
     """declared keys: music, footage, lyrics_or_scripts (bool), commentary (bool), ai_generated (bool), templated (bool), reupload (bool)."""
     text = f"{title} {description} {' '.join(tags or [])}".lower()
     rows: list[dict] = []
@@ -78,6 +78,10 @@ def screen(title: str, description: str, tags: list[str] | None, declared: dict,
     if near[0] >= 0.9:
         rows.append(_row("Low", f"Title almost identical to another channel's video: '{near[1]}'", "Copying another creator's title can confuse viewers and look like reuse.",
                          "Write your own angle; do not copy titles or thumbnails.", 10))
+    if ai_flags:
+        rows.append(_row("Medium", "AI noticed possible rights issues in the footage (uncertain): " + "; ".join(ai_flags[:3]),
+                         "An AI model looked at sampled frames and noticed signs such as broadcast graphics, logos, watermarks or on-screen lyrics. It can be wrong in both directions.",
+                         "Check the footage yourself; remove or replace third-party material, or confirm you have permission.", 10))
     score = int(min(100, sum(r["points"] for r in rows)))
     level = "Low" if score < 25 else "Medium" if score < 55 else "High"
     findings = pd.DataFrame(rows, columns=["severity", "issue", "why_it_matters", "what_to_do", "points"])

@@ -13,7 +13,9 @@ import streamlit as st
 from src import content_gap_analysis as gaps_a
 from src import content_strategy as strat
 from src import monetization as mon
+from src import platforms as pf
 from src import roadmap as rm
+from src import growth_predictor as gpred
 from src import studio as stu
 from src import trends as trn
 from src import upload_planner as upl
@@ -83,7 +85,7 @@ def csv_button(label: str, df: pd.DataFrame, name: str, key: str) -> None:
 
 
 def reset_analysis() -> None:
-    for k in ("results", "exports", "exports_version", "tpl_text", "plan_progress", "studio", "trend_chart", "radar", "trend_terms"):
+    for k in ("results", "exports", "exports_version", "tpl_text", "plan_progress", "studio", "trend_chart", "radar", "trend_terms", "viral"):
         st.session_state.pop(k, None)
 
 
@@ -630,12 +632,74 @@ def get_client():
     return SampleClient() if data_mode() == "sample" else YouTubeClient(youtube_key())
 
 
+PLATFORM_SECRETS = ("X_BEARER_TOKEN", "TIKTOK_CLIENT_KEY", "TIKTOK_CLIENT_SECRET", "META_ACCESS_TOKEN", "INSTAGRAM_BUSINESS_ACCOUNT_ID")
+
+
+def get_connectors():
+    secrets = {k: read_setting(k, _secrets()) for k in PLATFORM_SECRETS}
+    sample = data_mode() == "sample"
+    return pf.build_connectors(None if sample else YouTubeClient(youtube_key()), secrets, sample)
+
+
+def _default_niche(r: dict) -> str:
+    detected = stu.detect_niche(r["videos"])
+    return detected if detected in pf.NICHE_PRESETS else "football"
+
+
 def tab_trends(r: dict) -> None:
-    st.markdown(section("Trend Radar: what is moving on YouTube right now"), unsafe_allow_html=True)
-    st.caption("Uses only the official YouTube Data API (public data). " + trn.PLATFORM_NOTE)
-    with st.expander("Why only YouTube?"):
-        st.markdown(trn.PLATFORM_NOTE)
-    st.markdown("#### 1. YouTube's official most-popular chart")
+    st.markdown(section("Trend Radar: what is going viral right now"), unsafe_allow_html=True)
+    st.caption("Official platform APIs only - no scraping. Platforms the app owner has not connected are shown as 'not connected' below.")
+    st.markdown("#### 1. Viral and trending videos in your niche, across platforms")
+    keys = list(pf.NICHE_PRESETS)
+    c1, c2, c3 = st.columns([1, 2, 1])
+    niche = c1.selectbox("Niche", keys, index=keys.index(_default_niche(r)), format_func=lambda k: pf.NICHE_PRESETS[k]["label"])
+    custom = c2.text_input("Or your own keywords (comma separated)", placeholder="e.g. premier league goals, messi skills")
+    days = c3.slider("Last (days)", 1, 30, 7)
+    connectors = get_connectors()
+    with st.expander("Platform connections"):
+        st.dataframe(pf.status_table(connectors), hide_index=True, width="stretch")
+        st.caption("X recent search covers the last 7 days. TikTok's Research API is limited to approved researchers (30-day windows). Instagram hashtag search returns popular posts without view counts and allows 30 unique hashtags per 7 days. "
+                   "Facebook offers no public video search. The app owner adds credentials in Streamlit secrets; users never enter keys.")
+    available = [c.name for c in connectors if c.configured()]
+    chosen = st.multiselect("Platforms to search", available, default=available)
+    if st.button("🔍 Find viral videos in my niche"):
+        cfg = pf.niche_config(niche, custom)
+        with st.spinner("Searching the connected platforms..."):
+            df, warn = pf.discover(connectors, cfg, days, chosen)
+        st.session_state["viral"] = {"df": df, "warnings": warn, "label": cfg["label"], "days": days, "keywords": cfg["keywords"]}
+    V = st.session_state.get("viral")
+    viral_terms: list[str] = []
+    if V:
+        for w in V["warnings"]:
+            st.warning(w)
+        df = V["df"]
+        if df.empty:
+            st.info("No videos found. Connect more platforms, widen the time window or change the keywords.")
+        else:
+            if data_mode() == "sample":
+                st.warning("DEMO DATA: these cross-platform results are illustrative, not real.")
+            summ = pf.platform_summary(df)
+            cards([("Videos found", str(len(df)), f"{V['label']}, last {V['days']} days"), ("Trending now", str(int((df['status'] == 'Trending now').sum())), "posted within 48h and top-scoring"),
+                   ("Platforms", str(df["platform"].nunique()), ", ".join(sorted(df["platform"].unique()))), ("Top score", f"{df['viral_score'].max():.0f}", "percentile within its platform")])
+            pick = st.multiselect("Show platforms", sorted(df["platform"].unique()), default=sorted(df["platform"].unique()), key="viral_filter")
+            view = df[df["platform"].isin(pick)]
+            cols = ["platform", "title", "url", "author", "status", "viral_score", "views", "likes", "comments", "shares", "age_hours", "duration_seconds"]
+            st.dataframe(view[cols], hide_index=True, width="stretch", height=420,
+                         column_config={"url": st.column_config.LinkColumn("Link", display_text="open"),
+                                        "viral_score": st.column_config.ProgressColumn("Viral score", min_value=0, max_value=100, format="%.0f"),
+                                        "age_hours": st.column_config.NumberColumn("Age (h)", format="%.0f")})
+            st.caption("Viral score = percentile of how fast a video gains views/engagement compared with the other results from the SAME platform, so platforms are not directly comparable. "
+                       "Engagement = likes + 2x comments + 3x shares; Instagram returns no view counts. Metrics are as of the moment of the search.")
+            csv_button("Download viral videos (CSV)", view[cols], "viral_videos.csv", "dl_viral")
+            tags = pf.top_hashtags(df)
+            if len(tags):
+                st.plotly_chart(style(px.bar(tags, x="hashtag", y="viral_posts", color_discrete_sequence=[PALETTE["pink"]]), "Hashtags most used by the high-scoring videos"), width="stretch")
+            for line in pf.what_they_share(df):
+                st.markdown(f"- {line}")
+            viral_terms = tags["hashtag"].tolist()[:8] if len(tags) else []
+            st.dataframe(summ, hide_index=True, width="stretch")
+
+    st.markdown("#### 2. YouTube's official most-popular chart")
     c1, c2, c3 = st.columns([1, 2, 1])
     region = c1.selectbox("Region", ["US", "GB", "IN", "BD", "PK", "CA", "AU", "DE", "FR", "BR", "JP", "KR", "ID", "NG", "AE", "TR"], index=0)
     cat = c2.selectbox("Category", list(trn.TREND_CATEGORIES))
@@ -653,11 +717,11 @@ def tab_trends(r: dict) -> None:
         cols = ["title", "url", "views", "views_per_hour", "age_days", "duration", "format", "pattern"]
         show_df(chart[cols], height=360)
         csv_button("Download trending chart (CSV)", chart[cols], "trending_chart.csv", "dl_trend_chart")
-        L = trn.learnings(chart.rename(columns={}).assign(status="x"), 15)
+        L = trn.learnings(chart.assign(status="x"), 15)
         if L.get("available"):
             st.markdown(f"**What the fastest {L['n']} share:** {L['short_form_share']:.0%} short-form, median length {L['median_duration']}, common title patterns "
                         f"{', '.join(L['common_patterns'])}; common words: {', '.join(L['common_terms'])}. *{L['note']}*")
-    st.markdown("#### 2. High-potential videos from creators you choose")
+    st.markdown("#### 3. High-potential videos from creators you choose (YouTube)")
     st.caption("Paste up to 10 YouTube creators (channel links or @handles), such as players or channels in your niche. A video is flagged when its views per day are well above that creator's own usual pace.")
     text = st.text_area("Creators (one per line)", height=110, placeholder="@creator1\nhttps://www.youtube.com/@creator2", key="radar_text")
     window = st.slider("Look at videos published in the last (days)", 7, 60, 30)
@@ -682,10 +746,10 @@ def tab_trends(r: dict) -> None:
             L = trn.learnings(hp if len(hp) else tbl, 10)
             if L.get("available"):
                 st.markdown(f"**What the fastest videos share:** {L['short_form_share']:.0%} short-form; median length {L['median_duration']}; patterns: {', '.join(L['common_patterns'])}; words: {', '.join(L['common_terms'])}. *{L['note']}*")
-    terms = trn.trend_terms(chart if chart is not None else None, (rad or {}).get("table") if rad else None)
-    st.session_state["trend_terms"] = terms
-    if terms:
-        st.caption("Trending words found here are passed to the Video Studio's title and hashtag generator: " + ", ".join(terms))
+    terms = trn.trend_terms(chart if chart is not None else None, (rad or {}).get("table") if rad else None) + viral_terms
+    st.session_state["trend_terms"] = list(dict.fromkeys(terms))
+    if st.session_state["trend_terms"]:
+        st.caption("Trending words found here are passed to the Video Studio's title and hashtag generator: " + ", ".join(st.session_state["trend_terms"][:15]))
 
 
 # --------------------------------------------------------------------------- Video Studio
@@ -698,22 +762,26 @@ def _fmt_probe_cards(p: dict) -> None:
 
 
 def tab_studio(r: dict) -> None:
-    st.markdown(section("Video Studio: upload a video and get advice tuned to your channel"), unsafe_allow_html=True)
-    st.info("Everything is tuned to **your channel's public performance** (views, views/day, likes and comments, formats, lengths, publishing times). "
-            "Subscribers' private behaviour (watch time, retention, demographics) is not public, so it is inferred from those proxies, not known. "
-            "Your video file is analysed temporarily on the server and deleted immediately; it is never stored.")
+    st.markdown(section("Video Studio: upload a video and the AI does the rest"), unsafe_allow_html=True)
     prov = ai_provider()
+    if prov:
+        st.success("AI video understanding is ON: upload a video and the topic, titles, description and tags are worked out automatically.")
+    else:
+        st.warning("AI video understanding is OFF (the app owner has not added an AI key). Everything measurable still works, but the app cannot see what your video is about, so please type the topic.")
+    st.info("Everything is tuned to **your channel's public performance** (views, views/day, likes and comments, formats, lengths, publishing times) and to your discovered competitors. "
+            "Subscribers' private behaviour (watch time, retention, demographics) is not public, so it is inferred from those proxies. "
+            "Your video is analysed temporarily and deleted immediately; only a few sampled frames are sent to the AI provider, and nothing is stored.")
     with st.form("studio_form"):
-        up_file = st.file_uploader("Your video (optional but recommended)", type=["mp4", "mov", "m4v", "webm", "mkv"])
+        up_file = st.file_uploader("Your video", type=["mp4", "mov", "m4v", "webm", "mkv"])
         c1, c2 = st.columns(2)
         title = c1.text_input("Working title (optional)")
-        topic = c2.text_input("Topic / main keyword", placeholder="e.g. cold brew coffee at home")
-        summary = st.text_area("What happens in the video? (1-3 sentences)", height=80)
-        description = st.text_area("Draft description / captions text (optional, for the copyright text screen)", height=70)
+        topic = c2.text_input("Topic / main keyword (optional when AI is on)", placeholder="e.g. cold brew coffee at home")
+        summary = st.text_area("Notes about the video (optional)", height=70)
+        description = st.text_area("Draft description / captions text (optional, for the copyright text screen)", height=60)
         c3, c4, c5 = st.columns(3)
         fmt = c3.radio("Format", ["Auto", "Short", "Long-form"], horizontal=True)
         tz = c4.selectbox("Your time zone", upl.COMMON_TZ, index=1)
-        weekday = c5.selectbox("Planned weekday (Shorts estimate)", ["Not decided"] + upl.WEEKDAYS)
+        weekday = c5.selectbox("Planned weekday (views estimate)", ["Not decided"] + upl.WEEKDAYS)
         st.markdown("**Rights declaration** (used only for the risk screen)")
         d1, d2 = st.columns(2)
         music = d1.selectbox("Music", ["unsure", "none", "own", "licensed", "unlicensed"], format_func=lambda x: {"unsure": "Not sure where it's from", "none": "No music", "own": "My own music", "licensed": "Licensed / royalty-free with proof", "unlicensed": "Popular/unlicensed track"}[x])
@@ -729,28 +797,29 @@ def tab_studio(r: dict) -> None:
         go_btn = st.form_submit_button("🎬 Analyse my video")
     if go_btn:
         if not (title.strip() or topic.strip() or up_file):
-            st.error("Add at least a title, a topic or a video file.")
+            st.error("Upload a video, or add at least a title or topic.")
         else:
-            probe = None
+            probe, frames, transcript = None, [], None
             try:
                 if up_file is not None:
-                    with st.spinner("Measuring your video (loudness, cuts, silence, tempo)..."):
-                        probe = vprobe.analyze_bytes(up_file.getvalue(), "." + up_file.name.rsplit(".", 1)[-1])  # temp file is always deleted
-                with st.spinner("Building your recommendations..."):
+                    with st.spinner("Measuring your video and sampling frames..."):
+                        probe, frames, transcript = vprobe.analyze_bytes_full(up_file.getvalue(), "." + up_file.name.rsplit(".", 1)[-1], with_transcript=True)
+                with st.spinner("Understanding the video and building your recommendations..."):
                     ref_titles = pd.concat([d["title"] for d in r["competitor_videos"].values()]).tolist() if r["competitor_videos"] else []
                     st.session_state["studio"] = stu.run_studio(
                         r, {"title": title, "topic": topic, "summary": summary, "description": description, "format": fmt, "tz": tz,
                             "weekday": None if weekday == "Not decided" else upl.WEEKDAYS.index(weekday), "music": music, "footage": footage,
                             "commentary": commentary, "lyrics_or_scripts": lyrics, "ai_generated": ai_gen, "templated": templ, "reupload": reup,
-                            "goal": goal, "music_credit": credit}, probe, prov, st.session_state.get("trend_terms"), ref_titles)
+                            "goal": goal, "music_credit": credit}, probe, prov, st.session_state.get("trend_terms"), ref_titles, frames=frames, transcript=transcript)
             except vprobe.FFmpegMissing as exc:
                 st.error(str(exc))
             except ValueError as exc:
                 st.error(str(exc))
     S = st.session_state.get("studio")
     if not S:
-        st.caption("Fill in the form and press **Analyse my video**. Run the Trend Radar first if you want trending words in the titles and hashtags.")
+        st.caption("Upload a video and press **Analyse my video**. Run the Trend Radar first if you want trending words in the titles and hashtags.")
         return
+    und = S["understanding"]
     st.success(f"Planned format: **{S['format']}**" + (f" | {S['ai_note']}" if S.get("ai_note") else ""))
     if S["audience_summary"]:
         st.markdown("**What your public data says your audience responds to:** " + " ".join(S["audience_summary"]))
@@ -761,38 +830,62 @@ def tab_studio(r: dict) -> None:
         tp = S["probe"].get("tempo") or {}
         if tp.get("bpm"):
             st.caption(f"Rough tempo of the audio: {tp['bpm']:.0f} BPM (confidence {tp['confidence']:.2f}; only meaningful when music dominates).")
-    st.markdown(section("2. Editing and music advice"), unsafe_allow_html=True)
-    colors = {"High": PALETTE["coral"], "Medium": PALETTE["violet"], "Low": PALETTE["teal"]}
-    for a in S["editing_advice"].itertuples():
-        st.markdown(card(f"{a.area}: {a.finding}", f"{a.advice}<br><i>Evidence: {a.evidence}</i>", colors.get(a.priority, PALETTE["violet"]), a.priority), unsafe_allow_html=True)
-    m = S["music"]
-    st.markdown(f"**Music direction ({m['niche']} niche):** {m['mood']}, about {m['bpm_low']}-{m['bpm_high']} BPM; genres to explore: {', '.join(m['genres'])}. {m['licence']} *({m['basis']})*")
-    st.markdown(section("3. Title, caption and hashtags"), unsafe_allow_html=True)
-    st.caption("'Channel fit' scores how closely a draft matches what has worked on YOUR channel (pattern, length, keyword placement, specificity) and flags risky wording or duplicates. It is not a prediction of views.")
+
+    st.markdown(section("2. What the AI understood about your video"), unsafe_allow_html=True)
+    if und["confidence"] == "none":
+        st.info(und["source"] + ". Add an AI key (AI_API_KEY in secrets) to switch on automatic understanding.")
+    else:
+        st.markdown(card(f"{und['topic'] or 'Topic not detected'}", f"{und['summary']}<br><b>Niche:</b> {und['niche']} | <b>Audience:</b> {und['audience']} | <b>Mood:</b> {und['mood']} | <b>Language:</b> {und['language']}<br>"
+                         f"<b>Key moments:</b> {'; '.join(und['key_moments'])}<br><i>{und['source']} - confidence {und['confidence']}. AI can be wrong; check it.</i>", PALETTE["violet"], und["confidence"].title()), unsafe_allow_html=True)
+
+    st.markdown(section("3. Recommended title, description and tags"), unsafe_allow_html=True)
+    st.caption("'Channel fit' scores how closely a title matches what has worked on YOUR channel (pattern, length, keyword placement, specificity) and flags risky wording or duplicates. It is not a prediction of views.")
     if len(S["titles"]):
         st.dataframe(S["titles"][["title", "fit_score", "pattern", "source", "notes"]], hide_index=True, width="stretch",
                      column_config={"fit_score": st.column_config.ProgressColumn("Channel fit", min_value=0, max_value=100, format="%.0f")})
     st.markdown("**Hashtags** (first 3 show above the title): " + " ".join(S["hashtags"]["hashtags"]))
     st.caption(S["hashtags"]["note"])
-    st.text_area("Hidden tags (optional)", S["hashtags"]["hidden_tags"], height=60, key="hid_tags")
-    st.text_area("Caption / description draft (edit freely)", S["caption"], height=230, key="cap_txt")
-    st.markdown(section("4. Shorts performance estimate"), unsafe_allow_html=True)
-    sh = S["shorts"]
-    if sh.get("available"):
-        cards([("Low", format_number(sh["estimate_low"]), "25th percentile"), ("Typical", format_number(sh["estimate_mid"]), "views at ~14+ days"),
-               ("High", format_number(sh["estimate_high"]), "75th percentile"), ("Confidence", sh["confidence"], f"{sh['n_shorts']} mature Shorts")])
-        st.caption(sh["range_note"])
-        bt = sh.get("backtest", {})
+    st.text_area("Tags (hidden, optional)", S["hashtags"]["hidden_tags"], height=60, key="hid_tags")
+    st.text_area("Title + description draft (edit freely)", S["caption"], height=230, key="cap_txt")
+
+    st.markdown(section("4. Probable performance: views, subscribers, engagement and watch time"), unsafe_allow_html=True)
+    fc, vw = S["forecast"], S["views"]
+    if fc.get("available"):
+        dur = float((S["probe"] or {}).get("duration_seconds") or (30 if S["format"] == "Short" else 600))
+        pct = st.slider("Assumed average % of the video watched (not measured - edit it)", 10, 100, int(round(fc["pct_watched"] * 100)), step=5, key="pct_watched") / 100
+        fc = gpred.forecast(r, vw, S["format"], dur, pct)
+        t = fc["table"].set_index("metric")
+        def mid(m):
+            return format_number(t.loc[m, "mid"]) if m in t.index else "n/a"
+        cards([("Views (typical)", mid("Views at maturity"), f"range {format_number(t.loc['Views at maturity', 'low'])}-{format_number(t.loc['Views at maturity', 'high'])}"),
+               ("New subscribers", mid("New subscribers"), "rough; per-video data is private"),
+               ("Likes + comments", format_number((t.loc['Likes', 'mid'] if 'Likes' in t.index else 0) + (t.loc['Comments', 'mid'] if 'Comments' in t.index else 0)), "your typical rates"),
+               ("Watch hours", mid("Watch hours (assumption-based)"), f"if {pct:.0%} is watched")])
+        st.dataframe(fc["table"].round(1), hide_index=True, width="stretch")
+        for line in fc["context"]:
+            st.markdown(f"- {line}")
+        bt = vw.get("backtest", {})
         if bt.get("n"):
-            st.markdown(f"**Back-test on your own Shorts ({bt['n']}):** typical error {bt['median_abs_pct_error_baseline']:.0%} for the plain median vs {bt['median_abs_pct_error_with_factors']:.0%} with topic/title/weekday/length adjustments; "
-                        f"{bt['share_inside_range']:.0%} of your Shorts fell inside the range. Adjustments {'are' if sh['factors_used'] else 'are NOT'} used because they {'beat' if sh['factors_used'] else 'did not beat'} the plain median.")
-        if len(sh.get("factors", [])):
-            st.dataframe(sh["factors"], hide_index=True, width="stretch")
-        for n_ in sh["notes"]:
+            st.markdown(f"**Back-test on your own videos in this format ({bt['n']}):** typical error {bt['median_abs_pct_error_baseline']:.0%} for the plain median vs {bt['median_abs_pct_error_with_factors']:.0%} with topic/title/weekday/length adjustments; "
+                        f"{bt['share_inside_range']:.0%} fell inside the range. Adjustments {'are' if vw['factors_used'] else 'are NOT'} used because they {'beat' if vw['factors_used'] else 'did not beat'} the plain median.")
+        if len(vw.get("factors", [])):
+            st.dataframe(vw["factors"], hide_index=True, width="stretch")
+        for n_ in fc["notes"] + vw["notes"]:
             st.caption(n_)
     else:
-        st.info(sh.get("reason", "Not available."))
-    st.markdown(section("5. Upload planner"), unsafe_allow_html=True)
+        st.info(fc.get("reason", "Not available."))
+
+    st.markdown(section("5. Your upload vs your competitors"), unsafe_allow_html=True)
+    if len(S["comparison"]):
+        st.dataframe(S["comparison"].round(3), hide_index=True, width="stretch")
+        st.caption("Peers = the competitors discovered automatically, same format. 'Typical range' is their 25th-75th percentile; being outside it is a prompt to think, not an error.")
+    else:
+        st.info("No competitor data to compare with.")
+    if len(S["closest"]):
+        st.markdown("**Closest competitor videos (most similar topic)**")
+        show_df(S["closest"])
+
+    st.markdown(section("6. Recommended upload schedule"), unsafe_allow_html=True)
     pl = S["planner"]
     st.caption(f"Time zone: {pl['tz']}. Reliability: **{pl['reliability']}** - {pl['reliability_note']} Slots are your own mature videos' median views relative to your median, shrunk toward a prior; slots with your own data are preferred.")
     if len(pl["best"]):
@@ -802,15 +895,23 @@ def tab_studio(r: dict) -> None:
         st.markdown("**Slots that have underperformed for you (3+ videos)**")
         st.dataframe(pl["avoid"][["day", "window", "own_videos", "score"]], hide_index=True, width="stretch")
     heat = pl["slots"].pivot(index="day", columns="window", values="score").reindex(upl.WEEKDAYS)
-    fig = px.imshow(heat, color_continuous_scale="Viridis", aspect="auto", labels={"color": "slot score"})
-    st.plotly_chart(style(fig, "Slot score by weekday and 3-hour window (your time zone)"), width="stretch")
+    st.plotly_chart(style(px.imshow(heat, color_continuous_scale="Viridis", aspect="auto", labels={"color": "slot score"}), "Slot score by weekday and 3-hour window (your time zone)"), width="stretch")
     if len(pl["plan"]):
         st.markdown(f"**Suggested upload schedule for the next 14 days** (goal ~{pl['uploads_per_30_days_goal']:.1f} uploads per 30 days; first line is this video)")
         show_df(pl["plan"])
         csv_button("Download upload plan (CSV)", pl["plan"], "upload_plan.csv", "dl_upload_plan")
-    st.markdown(section("6. Copyright and reused-content risk screen"), unsafe_allow_html=True)
+
+    st.markdown(section("7. Editing and music advice"), unsafe_allow_html=True)
+    colors = {"High": PALETTE["coral"], "Medium": PALETTE["violet"], "Low": PALETTE["teal"]}
+    for a in S["editing_advice"].itertuples():
+        st.markdown(card(f"{a.area}: {a.finding}", f"{a.advice}<br><i>Evidence: {a.evidence}</i>", colors.get(a.priority, PALETTE["violet"]), a.priority), unsafe_allow_html=True)
+    m = S["music"]
+    extra = f" The AI suggests, from your footage: **{m['ai_mood']}**." if m.get("ai_mood") else ""
+    st.markdown(f"**Music direction ({m['niche']} niche):** {m['mood']}, about {m['bpm_low']}-{m['bpm_high']} BPM; genres to explore: {', '.join(m['genres'])}.{extra} {m['licence']} *({m['basis']})*")
+
+    st.markdown(section("8. Copyright and reused-content risk screen"), unsafe_allow_html=True)
     cp = S["copyright"]
-    cards([("Risk screen score", f"{cp['risk_score']}/100", "from your declarations and text"), ("Level", cp["level"], cp["summary"])])
+    cards([("Risk screen score", f"{cp['risk_score']}/100", "from your declarations, text and AI notes"), ("Level", cp["level"], cp["summary"])])
     if len(cp["findings"]):
         st.dataframe(cp["findings"][["severity", "issue", "why_it_matters", "what_to_do"]], hide_index=True, width="stretch")
     for item in cp["checklist"]:

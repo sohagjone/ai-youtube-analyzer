@@ -84,13 +84,16 @@ def score_title(title: str, ctx: dict, topic_words: set[str] | None = None) -> d
             "keyword_pts": kw_pts, "specificity_pts": spec_pts, "safety_pts": max(safety, 0), "notes": "; ".join(notes)}
 
 
-def rank_titles(topic: str, ctx: dict, summary: str = "", fmt: str = "Long-form", extra: list[str] | None = None, top: int = 8) -> pd.DataFrame:
+def rank_titles(topic: str, ctx: dict, summary: str = "", fmt: str = "Long-form", extra: list[str] | None = None, top: int = 8, keep_ai: int = 3) -> pd.DataFrame:
+    """Score template titles and any AI titles. The best `keep_ai` AI titles are always shown (they are based on the actual video)."""
     tw = set(tokenize(topic))
-    cands = candidate_titles(topic, summary, fmt) + [e for e in (extra or []) if e]
-    rows = [score_title(c, ctx, tw) for c in cands]
-    df = pd.DataFrame(rows).drop_duplicates("title").sort_values("fit_score", ascending=False).head(top).reset_index(drop=True)
-    df["source"] = df["title"].apply(lambda t: "AI" if extra and t in extra else "Template")
-    return df
+    ai_set = {e for e in (extra or []) if e}
+    rows = [score_title(c, ctx, tw) for c in candidate_titles(topic, summary, fmt) + list(ai_set)]
+    df = pd.DataFrame(rows).drop_duplicates("title")
+    df["source"] = df["title"].apply(lambda t: "AI" if t in ai_set else "Template")
+    ai = df[df["source"] == "AI"].sort_values("fit_score", ascending=False).head(keep_ai)
+    rest = df[~df["title"].isin(ai["title"])].sort_values("fit_score", ascending=False).head(max(top - len(ai), 0))
+    return pd.concat([ai, rest]).sort_values("fit_score", ascending=False).reset_index(drop=True)
 
 
 def _clean_tag(s: str) -> str:

@@ -268,6 +268,17 @@ class YouTubeClient:
             notes.append(f"Only {len(videos)} public video(s) available for the selected sample/date range (requested {sample_size}).")
         return {"channel": channel, "videos": videos, "notes": notes}
 
+    def search_recent_videos(self, query: str, published_after: datetime | None = None, max_results: int = 25, order: str = "viewCount") -> list[dict]:
+        """Keyword search for recent public videos (100 quota units per call), then full details (1 unit)."""
+        if not query or not query.strip():
+            raise YouTubeAPIError("Enter a search keyword.")
+        params: dict[str, Any] = {"part": "snippet", "type": "video", "q": query.strip(), "maxResults": max(1, min(int(max_results), 50)), "order": order}
+        if published_after:
+            params["publishedAfter"] = published_after.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        data = self._get("search", params)
+        ids = [(i.get("id") or {}).get("videoId") for i in data.get("items", [])]
+        return self.get_videos([i for i in ids if i])
+
     # ------------------------------------------------------------------ trending (official mostPopular chart)
     def get_most_popular(self, region_code: str = "US", category_id: str | None = None, max_results: int = 25) -> list[dict]:
         """YouTube's own 'most popular' chart for a region (1 quota unit). Some categories have no chart in some regions."""

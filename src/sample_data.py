@@ -91,3 +91,9 @@ class SampleClient:
                 v["title"] = "[SAMPLE] " + v["title"]
                 out.append(v)
         return out[:max_results]
+
+    def search_recent_videos(self, query: str, published_after=None, max_results: int = 25, order: str = "viewCount") -> list[dict]:
+        out = self.get_most_popular("US", None, max_results)
+        for v in out:
+            v["title"] = f"{v['title']} ({query})"
+        return out

@@ -44,22 +44,26 @@ class AIProvider:
     def _redact(self, text: str) -> str:
         return text.replace(self._api_key, "***") if self._api_key else text
 
-    def complete(self, system: str, user: str, max_tokens: int = 1500) -> str:
+    def complete(self, system: str, user: str, max_tokens: int = 1500, images: list[bytes] | None = None) -> str:
         if not self.is_configured:
             raise AIProviderError("No AI API key configured.")
+        import base64
+        b64 = [base64.b64encode(i).decode() for i in (images or [])]
         try:
             if self.provider == "anthropic":
+                content = [{"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": d}} for d in b64] + [{"type": "text", "text": user}]
                 resp = self.session.post(
                     "https://api.anthropic.com/v1/messages", timeout=self.timeout,
                     headers={"x-api-key": self._api_key, "anthropic-version": "2023-06-01", "content-type": "application/json"},
                     json={"model": self.model, "max_tokens": max_tokens, "system": system,
-                          "messages": [{"role": "user", "content": user}]})
+                          "messages": [{"role": "user", "content": content if b64 else user}]})
             else:
+                ocontent = [{"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{d}"}} for d in b64] + [{"type": "text", "text": user}]
                 resp = self.session.post(
                     "https://api.openai.com/v1/chat/completions", timeout=self.timeout,
                     headers={"Authorization": f"Bearer {self._api_key}", "content-type": "application/json"},
                     json={"model": self.model, "max_tokens": max_tokens,
-                          "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}]})
+                          "messages": [{"role": "system", "content": system}, {"role": "user", "content": ocontent if b64 else user}]})
         except (requests.Timeout, requests.ConnectionError) as exc:
             raise AIProviderError(self._redact(f"Could not reach the AI provider ({type(exc).__name__}).")) from None
         if resp.status_code != 200:
@@ -77,8 +81,8 @@ class AIProvider:
         except (ValueError, KeyError, IndexError, TypeError):
             raise AIProviderError("The AI provider returned an unexpected response.") from None
 
-    def complete_json(self, system: str, user: str, max_tokens: int = 1500) -> Any:
-        return parse_json_loose(self.complete(system, user, max_tokens))
+    def complete_json(self, system: str, user: str, max_tokens: int = 1500, images: list[bytes] | None = None) -> Any:
+        return parse_json_loose(self.complete(system, user, max_tokens, images))
 
 
 def parse_json_loose(text: str) -> Any:
