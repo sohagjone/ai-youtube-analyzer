@@ -19,7 +19,7 @@ Analyse a YouTube channel's **public** performance, compare up to five competito
 |---|---|---|
 | YouTube | `YOUTUBE_API_KEY` | search.list + videos.list (about 200 quota units per search) |
 | X | `X_BEARER_TOKEN` | recent search (last 7 days), `has:videos`; needs an API plan that allows search |
-| TikTok | `TIKTOK_CLIENT_KEY`, `TIKTOK_CLIENT_SECRET` | **Research API - approved researchers only**; 30-day windows |
+| TikTok | `TIKTOK_CLIENT_KEY`, `TIKTOK_CLIENT_SECRET` | **Research API - only for approved research projects.** Ordinary developer keys and creator/commercial accounts get HTTP 401 (`access_token_invalid` / missing `research.data.basic`). Without approval use TikTok's free Creative Center and paste its hashtags into the Trend Radar box |
 | Instagram | `META_ACCESS_TOKEN`, `INSTAGRAM_BUSINESS_ACCOUNT_ID` | hashtag search (popular posts, no view counts; 30 unique hashtags per 7 days; needs Instagram Public Content Access) |
 | Facebook | - | no public video search API exists (CrowdTangle was shut down), so it is not scraped |
 

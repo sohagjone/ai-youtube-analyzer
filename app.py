@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import re
 from datetime import date, datetime, time, timedelta, timezone
 
 import pandas as pd
@@ -660,6 +661,11 @@ def tab_trends(r: dict) -> None:
         st.dataframe(pf.status_table(connectors), hide_index=True, width="stretch")
         st.caption("X recent search covers the last 7 days. TikTok's Research API is limited to approved researchers (30-day windows). Instagram hashtag search returns popular posts without view counts and allows 30 unique hashtags per 7 days. "
                    "Facebook offers no public video search. The app owner adds credentials in Streamlit secrets; users never enter keys.")
+    with st.expander("TikTok without Research API approval"):
+        st.markdown("TikTok only lets **approved research projects** query videos (the Research API); creators, advertisers and commercial users are not eligible, and ordinary developer keys get a 401 error. "
+                    "Instead, open TikTok's own free **[Creative Center](https://ads.tiktok.com/business/creativecenter/)** (trending hashtags, songs and videos by country and industry), "
+                    "then add the hashtags you see here so the title, tag and hashtag generator can use them.")
+        manual = st.text_input("Trending TikTok hashtags you found (comma separated)", key="tiktok_manual", placeholder="#footballskills, #goalchallenge")
     available = [c.name for c in connectors if c.configured()]
     chosen = st.multiselect("Platforms to search", available, default=available)
     if st.button("🔍 Find viral videos in my niche"):
@@ -746,7 +752,8 @@ def tab_trends(r: dict) -> None:
             L = trn.learnings(hp if len(hp) else tbl, 10)
             if L.get("available"):
                 st.markdown(f"**What the fastest videos share:** {L['short_form_share']:.0%} short-form; median length {L['median_duration']}; patterns: {', '.join(L['common_patterns'])}; words: {', '.join(L['common_terms'])}. *{L['note']}*")
-    terms = trn.trend_terms(chart if chart is not None else None, (rad or {}).get("table") if rad else None) + viral_terms
+    manual_tags = [re.sub(r"[^0-9A-Za-z]", "", t).lower() for t in st.session_state.get("tiktok_manual", "").split(",")]
+    terms = trn.trend_terms(chart if chart is not None else None, (rad or {}).get("table") if rad else None) + viral_terms + [t for t in manual_tags if t]
     st.session_state["trend_terms"] = list(dict.fromkeys(terms))
     if st.session_state["trend_terms"]:
         st.caption("Trending words found here are passed to the Video Studio's title and hashtag generator: " + ", ".join(st.session_state["trend_terms"][:15]))

@@ -79,17 +79,39 @@ class _Base:
                 text = text.replace(sct, "***")
         return text
 
-    def _request(self, method: str, url: str, **kw):
+    def _detail(self, r) -> str:
+        """The platform's own error code/message (safe to show; secrets are redacted)."""
+        try:
+            body = r.json()
+        except ValueError:
+            return ""
+        err = body.get("error") if isinstance(body, dict) else None
+        if isinstance(err, dict):
+            parts = [str(err.get("code", "")), str(err.get("message", "")), f"log_id {err['log_id']}" if err.get("log_id") else ""]
+        elif isinstance(err, str):
+            parts = [err, str(body.get("error_description", ""))]
+        else:
+            parts = [str(body.get("title", "")) if isinstance(body, dict) else "", str(body.get("detail", "")) if isinstance(body, dict) else ""]
+        text = " - ".join(p for p in parts if p and p != "ok")
+        return self._safe(text)[:240]
+
+    def _hint(self, step: str, detail: str) -> str:
+        return "Check the credentials and that your plan/approval covers this endpoint."
+
+    def _request(self, method: str, url: str, step: str = "", **kw):
         try:
             r = self.session.request(method, url, timeout=self.timeout, **kw)
         except (requests.Timeout, requests.ConnectionError) as exc:
             raise PlatformError(self._safe(f"{self.name}: network problem ({type(exc).__name__}).")) from None
         if r.status_code in (401, 403):
-            raise PlatformError(f"{self.name}: access denied (HTTP {r.status_code}). Check the credentials and that your plan/approval covers this endpoint.")
+            detail = self._detail(r)
+            raise PlatformError(f"{self.name}{' (' + step + ')' if step else ''}: access denied (HTTP {r.status_code}"
+                                f"{', ' + detail if detail else ''}). {self._hint(step, detail)}")
         if r.status_code == 429:
             raise PlatformError(f"{self.name}: rate limit reached. Try again later.")
         if r.status_code >= 400:
-            raise PlatformError(self._safe(f"{self.name}: request failed (HTTP {r.status_code})."))
+            detail = self._detail(r)
+            raise PlatformError(self._safe(f"{self.name}{' (' + step + ')' if step else ''}: request failed (HTTP {r.status_code}{', ' + detail if detail else ''})."))
         try:
             return r.json()
         except ValueError:
@@ -169,12 +191,19 @@ class TikTokConnector(_Base):
     def configured(self) -> bool:
         return bool(self.key and self.secret)
 
+    def _hint(self, step: str, detail: str) -> str:
+        if step == "token request":
+            return "TikTok rejected the client key/secret. Copy them again from the app in the TikTok developer portal."
+        return ("This usually means the app is not approved for the Research API (scope research.data.basic). TikTok grants that only to approved research "
+                "projects - a normal developer account, or a creator/commercial account, cannot query videos. See the TikTok Research API eligibility page.")
+
     def _token(self) -> str:
-        data = self._request("POST", self.TOKEN_URL, data={"client_key": self.key, "client_secret": self.secret, "grant_type": "client_credentials"},
+        data = self._request("POST", self.TOKEN_URL, step="token request", data={"client_key": self.key, "client_secret": self.secret, "grant_type": "client_credentials"},
                              headers={"Content-Type": "application/x-www-form-urlencoded", "Cache-Control": "no-cache"})
         tok = data.get("access_token")
         if not tok:
-            raise PlatformError("TikTok: no access token returned (check the Research API client key/secret).")
+            why = self._safe(str(data.get("error_description") or data.get("error") or ""))[:200]
+            raise PlatformError("TikTok (token request): no access token returned" + (f" ({why})" if why else "") + ". Check the client key/secret.")
         self._secrets.append(tok)
         return tok
 
@@ -186,7 +215,7 @@ class TikTokConnector(_Base):
                 "max_count": 100, "cursor": 0, "start_date": (now - timedelta(days=days)).strftime("%Y%m%d"), "end_date": now.strftime("%Y%m%d")}
         out: list[dict] = []
         for _ in range(max(1, limit // 100)):
-            data = self._request("POST", self.QUERY_URL, params={"fields": self.FIELDS}, json=body,
+            data = self._request("POST", self.QUERY_URL, step="video query", params={"fields": self.FIELDS}, json=body,
                                  headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"})
             payload = data.get("data") or {}
             for v in payload.get("videos", []) or []:

@@ -185,3 +185,29 @@ def test_top_hashtags_and_what_they_share():
     assert len(tags) > 0 and tags["viral_posts"].is_monotonic_decreasing
     lines = pf.what_they_share(df)
     assert any("Descriptive only" in l for l in lines)
+
+
+# ------------------------------------------------------------------ TikTok error reporting (401 reports)
+def test_tiktok_401_on_query_reports_the_step_code_and_the_research_approval_reason():
+    err = {"error": {"code": "access_token_invalid", "message": "Access token is invalid", "log_id": "LOG123"}}
+    s = Sess(Resp(200, {"access_token": "AT"}), Resp(401, err))
+    with pytest.raises(pf.PlatformError) as e:
+        pf.TikTokConnector("KEY", "SEC", session=s).search(CFG, 7, NOW)
+    msg = str(e.value)
+    assert "(video query)" in msg and "access_token_invalid" in msg and "LOG123" in msg and "Research API" in msg and "research.data.basic" in msg
+    assert "AT" not in msg.replace("access_token_invalid", "").replace("Access token", "")  # the token itself is never shown
+
+
+def test_tiktok_bad_client_credentials_are_reported_as_the_token_step():
+    with pytest.raises(pf.PlatformError) as e:
+        pf.TikTokConnector("KEY", "SEC", session=Sess(Resp(401, {"error": "invalid_client", "error_description": "Client key or secret is incorrect"}))).search(CFG, 7, NOW)
+    assert "(token request)" in str(e.value) and "invalid_client" in str(e.value) and "client key/secret" in str(e.value)
+    with pytest.raises(pf.PlatformError) as e2:  # TikTok may also answer HTTP 200 with an error body
+        pf.TikTokConnector("KEY", "SEC", session=Sess(Resp(200, {"error": "invalid_client", "error_description": "bad secret SEC"}))).search(CFG, 7, NOW)
+    assert "token request" in str(e2.value) and "SEC" not in str(e2.value)
+
+
+def test_error_details_never_leak_credentials_for_any_platform():
+    with pytest.raises(pf.PlatformError) as e:
+        pf.XConnector("SECRETTOKEN", session=Sess(Resp(403, {"title": "Forbidden", "detail": "token SECRETTOKEN lacks access"}))).search(CFG, 7, NOW)
+    assert "SECRETTOKEN" not in str(e.value) and "Forbidden" in str(e.value)
